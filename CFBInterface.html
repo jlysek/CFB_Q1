@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CFB Quarter Score Predictor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f23; color: #e2e8f0; line-height: 1.6; }
+        .header { background: #1a1a2e; border-bottom: 1px solid #334155; padding: 1.5rem 0; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 0 1rem; }
+        .header-content { display: flex; justify-content: space-between; align-items: center; }
+        .logo { display: flex; align-items: center; gap: 0.75rem; }
+        .logo h1 { color: #60a5fa; font-size: 1.5rem; font-weight: 700; }
+        .status { font-size: 0.875rem; color: #94a3b8; }
+        .main { padding: 2rem 0; }
+        .games-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 2rem; }
+        .games-section { background: #1e293b; border-radius: 8px; border: 1px solid #334155; }
+        .section-header { padding: 1rem 1.5rem; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }
+        .section-title { font-size: 1.125rem; font-weight: 600; color: #f1f5f9; }
+        .game-card { padding: 1.5rem; border-bottom: 1px solid #334155; cursor: pointer; transition: background-color 0.2s; }
+        .game-card:hover { background: #334155; }
+        .game-card.selected { background: #1e40af; border-left: 4px solid #60a5fa; }
+        .game-card:last-child { border-bottom: none; }
+        .game-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+        .game-time { font-size: 0.875rem; color: #94a3b8; }
+        .conference-badge { background: #f59e0b; color: #0f0f23; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+        .teams { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-bottom: 1rem; }
+        .team { display: flex; justify-content: space-between; align-items: center; }
+        .team-name { font-size: 1.125rem; font-weight: 600; }
+        .team-label { font-size: 0.75rem; color: #94a3b8; }
+        .betting-info { display: flex; gap: 0.75rem; font-size: 0.875rem; }
+        .bet-chip { background: #374151; padding: 0.25rem 0.5rem; border-radius: 4px; color: #e5e7eb; }
+        .game-total { display: flex; justify-content: space-between; align-items: center; padding-top: 1rem; border-top: 1px solid #475569; font-size: 0.875rem; }
+        .total-info { display: flex; gap: 0.75rem; }
+        .q1-preview { background: #1e40af; padding: 0.25rem 0.75rem; border-radius: 4px; border: 1px solid #3b82f6; }
+        .predictions-panel { background: #1e293b; border-radius: 8px; border: 1px solid #334155; height: fit-content; }
+        .no-selection { padding: 3rem; text-align: center; color: #64748b; }
+        .prediction-header { padding: 1rem 1.5rem; border-bottom: 1px solid #334155; }
+        .prediction-content { padding: 1.5rem; }
+        .quarter-markets { margin-bottom: 1.5rem; }
+        .market-section { background: #374151; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+        .market-title { font-size: 0.875rem; font-weight: 600; color: #d1d5db; margin-bottom: 0.75rem; }
+        .market-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; }
+        .market-item { background: #4b5563; padding: 0.5rem; border-radius: 4px; text-align: center; }
+        .market-label { font-size: 0.75rem; color: #9ca3af; }
+        .market-value { font-weight: 600; color: #10b981; }
+        .predictions-list { max-height: 600px; overflow-y: auto; }
+        .prediction-item { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem; background: #374151; border-radius: 6px; margin-bottom: 0.5rem; }
+        .prediction-left { display: flex; align-items: center; gap: 0.75rem; }
+        .rank { width: 2rem; text-align: center; font-size: 0.875rem; color: #9ca3af; }
+        .score { font-family: 'Courier New', monospace; font-size: 1.125rem; font-weight: 700; color: #f1f5f9; }
+        .score-details { display: flex; gap: 0.5rem; font-size: 0.75rem; }
+        .detail-chip { background: #4b5563; padding: 0.125rem 0.375rem; border-radius: 3px; color: #d1d5db; }
+        .probability { padding: 0.375rem 0.75rem; border-radius: 20px; font-size: 0.875rem; font-weight: 600; }
+        .prob-high { background: #065f46; color: #10b981; }
+        .prob-med-high { background: #7c2d12; color: #fbbf24; }
+        .prob-med { background: #9a3412; color: #fb923c; }
+        .prob-low { background: #7f1d1d; color: #f87171; }
+        .loading { text-align: center; padding: 3rem; }
+        .spinner { width: 2rem; height: 2rem; border: 2px solid #374151; border-top: 2px solid #60a5fa; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 1rem; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .error { background: #7f1d1d; border: 1px solid #dc2626; color: #fca5a5; padding: 1rem; border-radius: 6px; margin: 1rem; }
+        .refresh-btn { background: #374151; border: 1px solid #4b5563; color: #e5e7eb; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; transition: background-color 0.2s; }
+        .refresh-btn:hover { background: #4b5563; }
+        .manual-input { background: #374151; border-radius: 6px; padding: 1.5rem; margin-bottom: 2rem; }
+        .input-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1rem; }
+        .input-group { display: flex; flex-direction: column; gap: 0.5rem; }
+        .input-label { font-size: 0.875rem; color: #d1d5db; font-weight: 500; }
+        .input-field { background: #1f2937; border: 1px solid #4b5563; color: #f3f4f6; padding: 0.5rem 0.75rem; border-radius: 4px; font-size: 0.875rem; }
+        .input-field:focus { outline: none; border-color: #60a5fa; box-shadow: 0 0 0 2px #1e40af; }
+        .predict-btn { background: #1e40af; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 4px; font-weight: 600; cursor: pointer; transition: background-color 0.2s; }
+        .predict-btn:hover { background: #1d4ed8; }
+        .predict-btn:disabled { background: #374151; cursor: not-allowed; }
+        .debug-info { background: #374151; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; font-size: 0.875rem; color: #d1d5db; }
+        .bankroll-section { background: #374151; border-radius: 6px; padding: 1.5rem; margin-bottom: 2rem; }
+        .bankroll-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 1rem; }
+        .kelly-output { background: #1f2937; padding: 1rem; border-radius: 4px; margin-top: 1rem; }
+        .kelly-result { font-size: 1.25rem; font-weight: 700; color: #10b981; }
+        .lines-toggle { background: #4b5563; color: #e5e7eb; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; margin-top: 0.5rem; font-size: 0.875rem; }
+        .lines-toggle:hover { background: #6b7280; }
+        .lines-dropdown { background: #1f2937; border-radius: 4px; padding: 1rem; margin-top: 0.5rem; display: none; }
+        .lines-dropdown.show { display: block; }
+        .lines-table { width: 100%; border-collapse: collapse; }
+        .lines-table th { text-align: left; padding: 0.5rem; border-bottom: 1px solid #4b5563; color: #9ca3af; font-size: 0.875rem; }
+        .lines-table td { padding: 0.5rem; border-bottom: 1px solid #374151; font-size: 0.875rem; }
+        .spread-market { background: #1f2937; padding: 1rem; border-radius: 4px; margin-bottom: 0.5rem; }
+        .spread-line { display: flex; justify-content: space-between; padding: 0.5rem; background: #374151; border-radius: 4px; margin-bottom: 0.25rem; }
+        .total-market { background: #1f2937; padding: 1rem; border-radius: 4px; margin-bottom: 0.5rem; }
+        .total-line { display: flex; justify-content: space-between; padding: 0.5rem; background: #374151; border-radius: 4px; margin-bottom: 0.25rem; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="container">
+            <div class="header-content">
+                <div class="logo"><h1>CFB Quarter Predictor</h1></div>
+                <div class="status"><span id="status">Bayesian Q1 Score Predictions</span></div>
+            </div>
+        </div>
+    </div>
+    <div class="main">
+        <div class="container">
+            <div class="debug-info" id="debug-info">Calculating current season and week...</div>
+            
+            <div class="bankroll-section">
+                <h3 style="margin-bottom: 1rem; color: #f1f5f9;">Bankroll & Kelly Criterion Calculator</h3>
+                <div class="bankroll-grid">
+                    <div class="input-group">
+                        <label class="input-label">Current Bankroll ($)</label>
+                        <input type="number" id="bankroll" class="input-field" placeholder="e.g., 10000" value="10000" step="100">
+                    </div>
+                    <div class="input-group">
+                        <label class="input-label">Fair Probability (%)</label>
+                        <input type="number" id="fairProb" class="input-field" placeholder="e.g., 55" min="0" max="100" step="0.1">
+                    </div>
+                    <div class="input-group">
+                        <label class="input-label">Offered Odds (American)</label>
+                        <input type="number" id="offeredOdds" class="input-field" placeholder="e.g., -110">
+                    </div>
+                </div>
+                <div class="bankroll-grid">
+                    <div class="input-group">
+                        <label class="input-label">Kelly Multiplier (%)</label>
+                        <input type="number" id="kellyMultiplier" class="input-field" value="25" min="1" max="100" step="1">
+                        <small style="color: #9ca3af;">Recommended: 25-50% for risk management</small>
+                    </div>
+                </div>
+                <button class="predict-btn" onclick="calculateKelly()">Calculate Bet Size</button>
+                <div class="kelly-output" id="kellyOutput" style="display: none;">
+                    <div style="margin-bottom: 0.5rem;"><strong>Kelly Bet Size:</strong> <span class="kelly-result" id="kellyAmount">$0</span></div>
+                    <div style="font-size: 0.875rem; color: #9ca3af;">
+                        <div>Expected Value: <span id="expectedValue">0%</span></div>
+                        <div>Risk of Ruin: Use fractional Kelly to manage variance</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="manual-input">
+                <h3 style="margin-bottom: 1rem; color: #f1f5f9;">Manual Prediction</h3>
+                <div class="input-grid">
+                    <div class="input-group"><label class="input-label">Home Team</label><input type="text" id="homeTeam" class="input-field" placeholder="e.g., Georgia" value="Georgia"></div>
+                    <div class="input-group"><label class="input-label">Away Team</label><input type="text" id="awayTeam" class="input-field" placeholder="e.g., Alabama" value="Alabama"></div>
+                    <div class="input-group"><label class="input-label">Spread</label><input type="number" id="spread" class="input-field" placeholder="e.g., -3.5" value="-3.5" step="0.5"></div>
+                    <div class="input-group"><label class="input-label">Total</label><input type="number" id="total" class="input-field" placeholder="e.g., 58.5" value="58.5" step="0.5"></div>
+                </div>
+                <button class="predict-btn" onclick="generateManualPrediction()">Generate Predictions</button>
+            </div>
+            <div class="games-grid">
+                <div class="games-section">
+                    <div class="section-header">
+                        <h2 class="section-title" id="games-title">Current Week Games</h2>
+                        <button class="refresh-btn" onclick="loadGames()">Refresh</button>
+                    </div>
+                    <div id="games-list"><div class="loading"><div class="spinner"></div><p>Loading games from CFBD API...</p></div></div>
+                </div>
+                <div class="predictions-panel">
+                    <div class="prediction-header"><h3 class="section-title">Q1 Score Predictions</h3></div>
+                    <div id="predictions-content"><div class="no-selection"><p>Select a game or use manual input to view predictions</p></div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        const API_KEY = 'meWCW794Y9rcfCIbk8aRXkLpI35TPBpvf8uzKg9A1yKXJBryMKqx80pETU79J4xT';
+        let currentGames = [];
+        let selectedGame = null;
+
+        function calculateKelly() {
+            const bankroll = parseFloat(document.getElementById('bankroll').value);
+            const fairProb = parseFloat(document.getElementById('fairProb').value) / 100;
+            const offeredOdds = parseFloat(document.getElementById('offeredOdds').value);
+            const kellyMultiplier = parseFloat(document.getElementById('kellyMultiplier').value) / 100;
+
+            if (isNaN(bankroll) || isNaN(fairProb) || isNaN(offeredOdds) || isNaN(kellyMultiplier)) {
+                alert('Please fill in all fields');
+                return;
+            }
+
+            let decimalOdds;
+            if (offeredOdds > 0) {
+                decimalOdds = (offeredOdds / 100) + 1;
+            } else {
+                decimalOdds = (100 / Math.abs(offeredOdds)) + 1;
+            }
+
+            const b = decimalOdds - 1;
+            const p = fairProb;
+            const q = 1 - p;
+            
+            const kellyFraction = (b * p - q) / b;
+            
+            const fractionalKelly = kellyFraction * kellyMultiplier;
+            const betSize = bankroll * fractionalKelly;
+            
+            const roundedBetSize = Math.round(betSize / 5) * 5;
+            
+            const ev = (p * (decimalOdds - 1) - (1 - p)) * 100;
+
+            document.getElementById('kellyOutput').style.display = 'block';
+            document.getElementById('kellyAmount').textContent = `${Math.max(0, roundedBetSize).toFixed(0)}`;
+            document.getElementById('expectedValue').textContent = `${ev.toFixed(2)}%`;
+            
+            if (kellyFraction <= 0) {
+                document.getElementById('kellyAmount').style.color = '#ef4444';
+                document.getElementById('expectedValue').style.color = '#ef4444';
+                document.getElementById('kellyAmount').textContent = 'No Edge - Do Not Bet';
+            } else {
+                document.getElementById('kellyAmount').style.color = '#10b981';
+                document.getElementById('expectedValue').style.color = '#10b981';
+            }
+        }
+
+        function toggleLines(index) {
+            const dropdown = document.getElementById(`lines-${index}`);
+            const game = currentGames[index];
+            
+            if (dropdown.classList.contains('show')) {
+                dropdown.classList.remove('show');
+                return;
+            }
+            
+            if (game.allLines && game.allLines.length > 0) {
+                let tableHTML = '<table class="lines-table"><thead><tr><th>Book</th><th>Spread (neg = home favored)</th><th>Total</th></tr></thead><tbody>';
+                
+                game.allLines.forEach(line => {
+                    tableHTML += `<tr><td>${line.provider}</td><td>${line.spread !== null ? line.spread : 'N/A'}</td><td>${line.overUnder !== null ? line.overUnder : 'N/A'}</td></tr>`;
+                });
+                
+                tableHTML += '</tbody></table>';
+                tableHTML += `<div style="margin-top: 0.5rem; font-size: 0.875rem; color: #9ca3af;">Median Spread: ${game.spread} | Median Total: ${game.total}</div>`;
+                dropdown.innerHTML = tableHTML;
+            } else {
+                dropdown.innerHTML = '<div style="color: #9ca3af; font-size: 0.875rem;">No detailed lines available</div>';
+            }
+            
+            dropdown.classList.add('show');
+        }
+
+        function getCurrentSeason() {
+            const today = new Date();
+            const currentYear = today.getFullYear();
+            const month = today.getMonth();
+            return month >= 7 ? currentYear : currentYear - 1;
+        }
+
+        function getUpcomingGamesDateRange() {
+            const today = new Date();
+            const startDate = new Date(today);
+            
+            const endDate = new Date(today);
+            const daysUntilSunday = (7 - today.getDay()) % 7 || 7;
+            endDate.setDate(today.getDate() + daysUntilSunday);
+            endDate.setHours(3 + 8, 0, 0, 0);
+            
+            return {
+                startDate: startDate.toISOString(),
+                endDate: endDate.toISOString()
+            };
+        }
+
+        function updateStatus() {
+            const season = getCurrentSeason();
+            const { startDate, endDate } = getUpcomingGamesDateRange();
+            const start = new Date(startDate);
+            const end = new Date(endDate);
+            
+            document.getElementById('status').textContent = `Bayesian Q1 Score Predictions • ${season} Season`;
+            document.getElementById('games-title').textContent = `Upcoming Games (${start.toLocaleDateString()} - ${end.toLocaleDateString()})`;
+            document.getElementById('debug-info').innerHTML = `<strong>Debug Info:</strong><br>Current Date: ${new Date().toDateString()}<br>Season: ${season}<br>Date Range: ${start.toDateString()} to ${end.toDateString()}<br>API Query: Using date range filter`;
+        }
+
+        async function loadGames() {
+            const gamesList = document.getElementById('games-list');
+            gamesList.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading games...</p></div>';
+            try {
+                const season = getCurrentSeason();
+                const { startDate, endDate } = getUpcomingGamesDateRange();
+                
+                const gamesResponse = await fetch(`https://api.collegefootballdata.com/games?year=${season}&seasonType=regular`, {
+                    headers: { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' }
+                });
+                if (!gamesResponse.ok) throw new Error(`Games API error: ${gamesResponse.status}`);
+                const allGamesData = await gamesResponse.json();
+                
+                const gamesData = allGamesData.filter(game => {
+                    const gameDate = new Date(game.startDate);
+                    const start = new Date(startDate);
+                    const end = new Date(endDate);
+                    return gameDate >= start && gameDate <= end;
+                });
+                
+                console.log(`Received ${allGamesData.length} total games, filtered to ${gamesData.length} upcoming games`);
+
+                const linesResponse = await fetch(`https://api.collegefootballdata.com/lines?year=${season}&seasonType=regular`, {
+                    headers: { 'Authorization': `Bearer ${API_KEY}`, 'Accept': 'application/json' }
+                });
+                let linesData = linesResponse.ok ? await linesResponse.json() : [];
+                console.log(`Received ${linesData.length} line groups from API`);
+
+                const processedGames = gamesData
+                    .filter(game => game.homeClassification === 'fbs' || game.awayClassification === 'fbs')
+                    .map(game => {
+                        const gameLinesArray = linesData.filter(line => line.id === game.id);
+                        let medianSpread = null;
+                        let medianTotal = null;
+                        let provider = null;
+                        let allLines = [];
+                        
+                        for (const lineGroup of gameLinesArray) {
+                            if (lineGroup.lines && lineGroup.lines.length > 0) {
+                                const spreads = [];
+                                const totals = [];
+                                
+                                for (const line of lineGroup.lines) {
+                                    allLines.push(line);
+                                    if (line.spread !== null && line.spread !== undefined) {
+                                        spreads.push(line.spread);
+                                    }
+                                    if (line.overUnder !== null && line.overUnder !== undefined) {
+                                        totals.push(line.overUnder);
+                                    }
+                                }
+                                
+                                if (spreads.length > 0) {
+                                    spreads.sort((a, b) => a - b);
+                                    const midIndex = Math.floor(spreads.length / 2);
+                                    if (spreads.length % 2 === 0) {
+                                        medianSpread = (spreads[midIndex - 1] + spreads[midIndex]) / 2;
+                                    } else {
+                                        medianSpread = spreads[midIndex];
+                                    }
+                                }
+                                
+                                if (totals.length > 0) {
+                                    totals.sort((a, b) => a - b);
+                                    const midIndex = Math.floor(totals.length / 2);
+                                    if (totals.length % 2 === 0) {
+                                        medianTotal = (totals[midIndex - 1] + totals[midIndex]) / 2;
+                                    } else {
+                                        medianTotal = totals[midIndex];
+                                    }
+                                }
+                                
+                                provider = spreads.length > 0 ? `Median of ${spreads.length} books` : null;
+                                break;
+                            }
+                        }
+                        
+                        return { ...game, spread: medianSpread, total: medianTotal, provider: provider, allLines: allLines };
+                    })
+                    .filter(game => game.spread !== null && game.total !== null)
+                    .sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
+
+                console.log(`Processed ${processedGames.length} games with betting lines`);
+                currentGames = processedGames;
+                displayGames(processedGames);
+            } catch (error) {
+                console.error('Error loading games:', error);
+                gamesList.innerHTML = `<div class="error">Error loading games: ${error.message}</div>`;
+            }
+        }
+
+        function displayGames(games) {
+            const gamesList = document.getElementById('games-list');
+            if (games.length === 0) {
+                gamesList.innerHTML = '<div class="no-selection"><p>No games with betting lines found for this week</p></div>';
+                return;
+            }
+            gamesList.innerHTML = games.map((game, index) => `
+                <div class="game-card" onclick="selectGame(${index})">
+                    <div class="game-header">
+                        <div class="game-time">${formatGameTime(game.startDate)}</div>
+                        ${game.conferenceGame ? '<span class="conference-badge">CONF</span>' : ''}
+                    </div>
+                    <div class="teams">
+                        <div class="team">
+                            <div><div class="team-name">${game.awayTeam}</div><div class="team-label">AWAY</div></div>
+                            <div class="betting-info"><span class="bet-chip">Spread: ${formatSpread(game.spread, 'away')}</span></div>
+                        </div>
+                        <div class="team">
+                            <div><div class="team-name">${game.homeTeam}</div><div class="team-label">HOME</div></div>
+                            <div class="betting-info"><span class="bet-chip">Spread: ${formatSpread(game.spread, 'home')}</span></div>
+                        </div>
+                    </div>
+                    <div class="game-total">
+                        <div class="total-info">
+                            <span class="bet-chip">Total: ${game.total}</span>
+                            ${game.provider ? `<span class="bet-chip">${game.provider}</span>` : ''}
+                        </div>
+                        <div class="q1-preview">Click for Q1 predictions →</div>
+                    </div>
+                    <button class="lines-toggle" onclick="toggleLines(${index})">See All Lines</button>
+                    <div class="lines-dropdown" id="lines-${index}"></div>
+                </div>
+            `).join('');
+        }
+
+        function formatGameTime(dateString) {
+            const date = new Date(dateString);
+            const dayName = date.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/Chicago' });
+            const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago' });
+            return `${dayName} ${time} CT`;
+        }
+
+        function formatSpread(spread, team) {
+            if (spread === 0) return "PK";
+            if (team === 'home') return spread > 0 ? `+${spread}` : spread.toString();
+            else return spread > 0 ? (-spread).toString() : `+${Math.abs(spread)}`;
+        }
+
+        async function selectGame(index) {
+            selectedGame = currentGames[index];
+            document.querySelectorAll('.game-card').forEach((card, i) => card.classList.toggle('selected', i === index));
+            await generatePredictions(selectedGame.spread, selectedGame.total, selectedGame.homeTeam, selectedGame.awayTeam);
+        }
+
+        async function generateManualPrediction() {
+            const homeTeam = document.getElementById('homeTeam').value;
+            const awayTeam = document.getElementById('awayTeam').value;
+            const spread = parseFloat(document.getElementById('spread').value);
+            const total = parseFloat(document.getElementById('total').value);
+            if (!homeTeam || !awayTeam || isNaN(spread) || isNaN(total)) {
+                alert('Please fill in all fields with valid values');
+                return;
+            }
+            await generatePredictions(spread, total, homeTeam, awayTeam);
+        }
+
+        async function generatePredictions(spread, total, homeTeam, awayTeam) {
+            const predictionsContent = document.getElementById('predictions-content');
+            predictionsContent.innerHTML = '<div class="loading"><div class="spinner"></div><p>Generating predictions...</p></div>';
+            try {
+                const response = await fetch('/api/predict-quarter-scores', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({ spread, total, homeTeam, awayTeam })
+                });
+                if (response.ok) {
+                    const predictions = await response.json();
+                    displayPredictions(predictions, homeTeam, awayTeam);
+                } else {
+                    const errorData = await response.json();
+                    throw new Error(`Prediction API error: ${response.status} - ${errorData.error || response.statusText}`);
+                }
+            } catch (error) {
+                console.error('Error generating predictions:', error);
+                predictionsContent.innerHTML = `<div class="error">Error generating predictions: ${error.message}<br>Make sure your Flask server is running on localhost:5000</div>`;
+            }
+        }
+
+        function displayPredictions(predictions, homeTeam, awayTeam) {
+            const predictionsContent = document.getElementById('predictions-content');
+            const markets = calculateQuarterMarkets(predictions);
+            
+            const spreadMarkets = calculateSpreadMarkets(predictions, homeTeam, awayTeam, selectedGame?.spread || 0);
+            const totalMarkets = calculateTotalMarkets(predictions);
+            const draw11_5 = calculateDrawMarket(predictions, 11.5);
+            const draw12_5 = calculateDrawMarket(predictions, 12.5);
+            
+            predictionsContent.innerHTML = `
+                <div class="prediction-content">
+                    <h4 style="margin-bottom: 1rem; color: #f1f5f9;">1st Quarter Spread</h4>
+                    <div class="spread-market">
+                        ${spreadMarkets.map(sm => `
+                            <div class="spread-line">
+                                <span>${sm.team} ${sm.line >= 0 ? '+' : ''}${sm.line.toFixed(1)}</span>
+                                <span style="color: #10b981;">${(sm.favoriteProb * 100).toFixed(1)}%<br><span style="font-size: 0.7rem;">${sm.favoriteOdds}</span></span>
+                                <span style="color: #64748b;">|</span>
+                                <span style="color: #f87171;">${(sm.underdogProb * 100).toFixed(1)}%<br><span style="font-size: 0.7rem;">${sm.underdogOdds}</span></span>
+                            </div>
+                        `).join('')}
+                    </div>
+                    
+                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem; color: #f1f5f9;">1st Quarter Total</h4>
+                    <div class="total-market">
+                        ${totalMarkets.map(tm => `
+                            <div class="total-line">
+                                <span>O/U ${tm.line.toFixed(1)}</span>
+                                <span style="color: #10b981;">${(tm.overProb * 100).toFixed(1)}% Over<br><span style="font-size: 0.7rem;">${tm.overOdds}</span></span>
+                                <span style="color: #64748b;">|</span>
+                                <span style="color: #f87171;">${(tm.underProb * 100).toFixed(1)}% Under<br><span style="font-size: 0.7rem;">${tm.underOdds}</span></span>
+                            </div>
+                        `).join('')}
+                    </div>
+                    
+                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem; color: #f1f5f9;">1st Quarter 2-Way Moneyline (Draw No Bet)</h4>
+                    <div class="market-section">
+                        <div class="market-grid" style="grid-template-columns: repeat(2, 1fr);">
+                            <div class="market-item">
+                                <div class="market-label">${homeTeam}</div>
+                                <div class="market-value">${(calculate2WayMoneyline(predictions).homeWin * 100).toFixed(1)}%</div>
+                                <div style="font-size: 0.75rem; color: #9ca3af;">${probabilityToAmericanOdds(calculate2WayMoneyline(predictions).homeWin)}</div>
+                            </div>
+                            <div class="market-item">
+                                <div class="market-label">${awayTeam}</div>
+                                <div class="market-value">${(calculate2WayMoneyline(predictions).awayWin * 100).toFixed(1)}%</div>
+                                <div style="font-size: 0.75rem; color: #9ca3af;">${probabilityToAmericanOdds(calculate2WayMoneyline(predictions).awayWin)}</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem; color: #f1f5f9;">1st Quarter Over 11.5 & Draw</h4>
+                    <div class="market-section" style="display: flex; justify-content: space-around; padding: 1rem;">
+                        <div style="text-align: center;">
+                            <div style="font-size: 0.875rem; color: #9ca3af;">Probability</div>
+                            <div style="font-size: 1.25rem; font-weight: 700; color: #10b981;">${(draw11_5.probability * 100).toFixed(1)}%</div>
+                        </div>
+                        <div style="text-align: center;">
+                            <div style="font-size: 0.875rem; color: #9ca3af;">Fair Odds</div>
+                            <div style="font-size: 1.25rem; font-weight: 700;">${draw11_5.odds}</div>
+                        </div>
+                    </div>
+                    
+                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem; color: #f1f5f9;">1st Quarter Over 12.5 & Draw</h4>
+                    <div class="market-section" style="display: flex; justify-content: space-around; padding: 1rem;">
+                        <div style="text-align: center;">
+                            <div style="font-size: 0.875rem; color: #9ca3af;">Probability</div>
+                            <div style="font-size: 1.25rem; font-weight: 700; color: #10b981;">${(draw12_5.probability * 100).toFixed(1)}%</div>
+                        </div>
+                        <div style="text-align: center;">
+                            <div style="font-size: 0.875rem; color: #9ca3af;">Fair Odds</div>
+                            <div style="font-size: 1.25rem; font-weight: 700;">${draw12_5.odds}</div>
+                        </div>
+                    </div>
+                    
+                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem; color: #f1f5f9;">Top 20 Score Predictions</h4>
+                    <div class="predictions-list">
+                        ${predictions.map((pred, index) => {
+                            const [home, away] = pred.score.split('-').map(Number);
+                            const total = home + away;
+                            const margin = home - away;
+                            const probClass = getProbabilityClass(pred.probability);
+                            return `<div class="prediction-item"><div class="prediction-left"><div class="rank">#${index + 1}</div><div><div class="score">${pred.score}</div><div class="score-details"><span class="detail-chip">Total: ${total}</span><span class="detail-chip">Margin: ${margin > 0 ? '+' : ''}${margin}</span></div></div></div><div class="probability ${probClass}">${(pred.probability * 100).toFixed(1)}%</div></div>`;
+                        }).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        function calculateSpreadMarkets(predictions, homeTeam, awayTeam, fullGameSpread) {
+            // Calculate cover probabilities for all .5 lines
+            const lineCoverProbs = {};
+            
+            for (let lineInt = -21; lineInt <= 21; lineInt += 2) {
+                const line = lineInt / 2;
+                lineCoverProbs[line] = 0;
+                
+                predictions.forEach(pred => {
+                    const [home, away] = pred.score.split('-').map(Number);
+                    const differential = home - away;
+                    if (differential > line) {
+                        lineCoverProbs[line] += pred.probability;
+                    }
+                });
+            }
+            
+            // Find line closest to 50%
+            let fairLine = -0.5;
+            let closestDiff = 1;
+            
+            for (const [lineStr, homeProb] of Object.entries(lineCoverProbs)) {
+                const line = parseFloat(lineStr);
+                const diff = Math.abs(homeProb - 0.5);
+                if (diff < closestDiff) {
+                    closestDiff = diff;
+                    fairLine = line;
+                }
+            }
+            
+            // Determine who is favored based on full game spread
+            // If fullGameSpread is negative, home is favored
+            // If fullGameSpread is positive, away is favored
+            const homeIsFavored = fullGameSpread < 0;
+            const favoriteTeam = homeIsFavored ? homeTeam : awayTeam;
+            
+            // Get the three lines
+            const lines = [fairLine - 1, fairLine, fairLine + 1];
+            
+            return lines.map(line => {
+                let homeCoverProb = 0;
+                
+                predictions.forEach(pred => {
+                    const [home, away] = pred.score.split('-').map(Number);
+                    const differential = home - away;
+                    if (differential > line) {
+                        homeCoverProb += pred.probability;
+                    }
+                });
+                
+                // Convert to favorite's perspective
+                let displayLine, favoriteCoverProb, underdogCoverProb;
+                
+                if (homeIsFavored) {
+                    // Home is favorite - line stays as is (negative)
+                    displayLine = -line;
+                    favoriteCoverProb = homeCoverProb;
+                    underdogCoverProb = 1 - homeCoverProb;
+                } else {
+                    // Away is favorite - flip the line to negative for favorite
+                    displayLine = line;
+                    favoriteCoverProb = 1 - homeCoverProb;
+                    underdogCoverProb = homeCoverProb;
+                }
+                
+                return { 
+                    team: favoriteTeam,
+                    line: displayLine,
+                    favoriteProb: favoriteCoverProb, 
+                    underdogProb: underdogCoverProb,
+                    favoriteOdds: probabilityToAmericanOdds(favoriteCoverProb),
+                    underdogOdds: probabilityToAmericanOdds(underdogCoverProb)
+                };
+            });
+        }
+
+        function calculateTotalMarkets(predictions) {
+            // Step 1: Calculate over probabilities for all possible .5 totals
+            const totalProbs = {};
+            
+            predictions.forEach(pred => {
+                const [home, away] = pred.score.split('-').map(Number);
+                const total = home + away;
+                
+                for (let lineInt = 11; lineInt <= 51; lineInt++) {
+                    const line = lineInt / 2;
+                    if (line % 1 !== 0.5) continue; // Only .5 lines
+                    
+                    if (!totalProbs[line]) {
+                        totalProbs[line] = 0;
+                    }
+                    
+                    if (total > line) {
+                        totalProbs[line] += pred.probability;
+                    }
+                }
+            });
+            
+            // Step 2: Find the line closest to 50% over
+            let bestLine = 10.5;
+            let closestDiff = 1;
+            
+            for (const [lineStr, overProb] of Object.entries(totalProbs)) {
+                const line = parseFloat(lineStr);
+                const diff = Math.abs(overProb - 0.5);
+                if (diff < closestDiff) {
+                    closestDiff = diff;
+                    bestLine = line;
+                }
+            }
+            
+            // Step 3: Get bestLine and +/- 1 point lines
+            const lines = [bestLine - 1, bestLine, bestLine + 1];
+            
+            // Step 4: Calculate probabilities for each line
+            return lines.map(line => {
+                let overProb = 0;
+                predictions.forEach(pred => {
+                    const [home, away] = pred.score.split('-').map(Number);
+                    const total = home + away;
+                    if (total > line) overProb += pred.probability;
+                });
+                
+                return { 
+                    line, 
+                    overProb, 
+                    underProb: 1 - overProb,
+                    overOdds: probabilityToAmericanOdds(overProb),
+                    underOdds: probabilityToAmericanOdds(1 - overProb)
+                };
+            });
+        }
+
+        function calculateDrawMarket(predictions, totalLine) {
+            let probability = 0;
+            predictions.forEach(pred => {
+                const [home, away] = pred.score.split('-').map(Number);
+                const total = home + away;
+                if (total > totalLine && home === away) {
+                    probability += pred.probability;
+                }
+            });
+            return {
+                probability,
+                odds: probabilityToAmericanOdds(probability)
+            };
+        }
+
+        function probabilityToAmericanOdds(prob) {
+            if (prob <= 0 || prob >= 1) return 'N/A';
+            if (prob >= 0.5) {
+                return (-(100 * prob / (1 - prob))).toFixed(0);
+            } else {
+                return '+' + ((100 * (1 - prob) / prob)).toFixed(0);
+            }
+        }
+        function calculate2WayMoneyline(predictions) {
+            let homeWins = 0, awayWins = 0;
+            predictions.forEach(pred => {
+                const [home, away] = pred.score.split('-').map(Number);
+                if (home > away) homeWins += pred.probability;
+                else if (away > home) awayWins += pred.probability;
+            });
+            // Normalize to exclude draws
+            const totalNonDrawProb = homeWins + awayWins;
+            const homeProb = homeWins / totalNonDrawProb;
+            const awayProb = awayWins / totalNonDrawProb;
+            
+            return { homeWin: homeProb, awayWin: awayProb };
+        }
+        function calculateQuarterMarkets(predictions) {
+            let homeWins = 0, awayWins = 0, ties = 0;
+            predictions.forEach(pred => {
+                const [home, away] = pred.score.split('-').map(Number);
+                if (home > away) homeWins += pred.probability;
+                else if (away > home) awayWins += pred.probability;
+                else ties += pred.probability;
+            });
+            return { homeWin: homeWins, awayWin: awayWins, tie: ties };
+        }
+
+        function getProbabilityClass(prob) {
+            if (prob >= 0.10) return 'prob-high';
+            if (prob >= 0.07) return 'prob-med-high';
+            if (prob >= 0.04) return 'prob-med';
+            return 'prob-low';
+        }
+
+        window.addEventListener('load', function() {
+            updateStatus();
+            loadGames();
+        });
+    </script>
+</body>
+</html>
