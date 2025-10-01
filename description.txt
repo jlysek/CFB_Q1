@@ -1,0 +1,38 @@
+bayesQ1.py
+Explaining the  of the bayesQ1 Model:
+
+Goal: Find P(Q1 Score | Pregame Closing Spread & Total)
+Data Range: 2014 - Present 
+Bayesian Equation: P(Hypothesis | Evidence) = (P(Hypothesis) * P(Evidence | Hypothesis))/P(Evidence) 
+Our Equation: P(Q1 Score | Pregame Closing Spread & Total) = (P(Q1 Score) * P(Pregame Closing Spread & Total | Q1 Score)) / P(Pregame Spread & Total)
+    - Where:
+        P(Q1 Score) is the empricial distribution of all college football scores 
+        P(Pregame Closing Spread & Total | Q1 Score) is found using a multinominal logictic regression (explained below)
+        P(Pregame Spread & Total) is ___
+Why we are using bayesian updating of the historic distribution of scores? 
+
+Defintions / Explanations:
+    multinominal logistic regression 
+        - Multinomial just means consisting of several terms (Binomial consist of two terms, Trinomial three, etc).These terms in our regression will be the possible scores 
+        - Logistic functions naturally creats numbers between 0 to 1 that sum to 1 which is perfect for our probabilities
+        - We are using it to find P(Spread and total | Score) aka given the score what is the probability of the possible spread and totals? For example a game that had a first 
+          quarter score x = 14 and y = 0. We would be much more likely to see spread of team x favored by 10 points and total being 63.5 then something like team y favored by 3 
+          points and total being 35.5 but the regression coefficients give us exact measurements. 
+        - Logit is the inverse probability. It transforms probabilities which we know to be between 0 and 1 to numbers from negative infinity to positive infinity. We need logit because
+          regressions work better with unconstrained numbers. Equation is logit(p) = log(p/(1-p)). 0.5 probability is 0 in logit, 0.9 probability is +2.2 in logit and 0.1 is -2.2
+        
+        - Breakinng down the regression equation for how we find P(Pregame Closing Spread & Total | Q1 Score): 
+
+        - Breaking down how we find P(Pregame Spread & Total)
+
+
+
+
+Scraper.py 
+    Using collegefootballdata.com API to pull the games, Q1 scores, and betting lines into mysql tables games and quarter_scoring
+
+prediction_server.py & CFBinterface.html
+    Create a gui that makes interacting with model much easier for upcoming games 
+
+For privacy reasons:
+    Will need to enter api key and database config in your command line argument
