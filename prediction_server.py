@@ -10,7 +10,9 @@ import logging
 from datetime import datetime
 import sys
 import traceback
-
+import os
+from dotenv import load_dotenv
+import requests
 # Import Bayesian model
 try:
     from bayesQ1 import CFBQuarterScorePredictor
@@ -26,13 +28,16 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# Database configuration
+# Load environment variables
+load_dotenv()
+
+# Database configuration from environment
 DB_CONFIG = {
-    'host': '127.0.0.1',
-    'port': 3306,
-    'user': 'root',
-    'password': '',
-    'database': 'cfb'
+    'host': os.getenv('DB_HOST', '127.0.0.1'),
+    'port': int(os.getenv('DB_PORT', 3306)),
+    'user': os.getenv('DB_USER', 'root'),
+    'password': os.getenv('DB_PASSWORD', ''),
+    'database': os.getenv('DB_NAME', 'cfb')
 }
 
 # Global predictor instance
@@ -130,45 +135,35 @@ def predict_quarter_scores():
         
         logger.info(f"Prediction: {away_team} @ {home_team}, Spread: {spread}, Total: {total}")
         
-        predictions_result = predictor.predict_score_probabilities(
+        # Get ALL score probabilities from the model
+        all_predictions = predictor.predict_score_probabilities(
             spread=spread,
-            total=total,
-            top_n=20
+            total=total
         )
         
-        if 'score_probabilities' in predictions_result:
-            predictions = predictions_result['score_probabilities']
-        else:
-            predictions = predictions_result
+        # Calculate betting markets using the FULL distribution
+        markets = predictor.calculate_betting_markets(all_predictions, spread, total)
         
+        # Sort by probability and take top 20 for display
+        sorted_predictions = sorted(all_predictions.items(), key=lambda x: x[1], reverse=True)
+        top_20_predictions = sorted_predictions[:20]
+        
+        # Format the top 20 predictions for display
         formatted_predictions = []
-        for item in predictions:
-            if isinstance(item, tuple) and len(item) == 2:
-                score, probability = item
-            elif isinstance(item, dict):
-                score = item.get('score')
-                probability = item.get('probability')
-            else:
-                continue
-            
-            if score and probability is not None:
-                try:
-                    prob_float = float(probability)
-                    if 0 <= prob_float <= 1:
-                        formatted_predictions.append({
-                            'score': str(score),
-                            'probability': prob_float
-                        })
-                except (ValueError, TypeError):
-                    continue
+        for score, probability in top_20_predictions:
+            formatted_predictions.append({
+                'score': str(score),
+                'probability': float(probability)
+            })
         
         if not formatted_predictions:
             return jsonify({'error': 'No valid predictions generated'}), 500
         
-        formatted_predictions.sort(key=lambda x: x['probability'], reverse=True)
-        top_predictions = formatted_predictions[:20]
-        
-        return jsonify(top_predictions)
+        # Return both predictions and pre-calculated markets
+        return jsonify({
+            'predictions': formatted_predictions,
+            'markets': markets
+        })
         
     except mysql.connector.Error as e:
         logger.error(f"Database error: {e}")
@@ -265,6 +260,64 @@ def main():
         debug=False,
         threaded=True
     )
+@app.route('/api/cfbd/games', methods=['GET'])
+def get_cfbd_games():
+    """Proxy CFBD games API to hide API key"""
+    try:
+        year = request.args.get('year')
+        season_type = request.args.get('seasonType', 'regular')
+        
+        api_key = os.getenv('CFBD_API_KEY')
+        if not api_key:
+            return jsonify({'error': 'API key not configured'}), 500
+        
+        response = requests.get(
+            'https://api.collegefootballdata.com/games',
+            params={'year': year, 'seasonType': season_type},
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'Accept': 'application/json'
+            },
+            timeout=10
+        )
+        
+        if response.ok:
+            return jsonify(response.json())
+        else:
+            return jsonify({'error': f'CFBD API error: {response.status_code}'}), response.status_code
+            
+    except Exception as e:
+        logger.error(f"Error fetching games: {e}")
+        return jsonify({'error': 'Failed to fetch games'}), 500
 
+@app.route('/api/cfbd/lines', methods=['GET'])
+def get_cfbd_lines():
+    """Proxy CFBD betting lines API to hide API key"""
+    try:
+        year = request.args.get('year')
+        season_type = request.args.get('seasonType', 'regular')
+        
+        api_key = os.getenv('CFBD_API_KEY')
+        if not api_key:
+            return jsonify({'error': 'API key not configured'}), 500
+        
+        response = requests.get(
+            'https://api.collegefootballdata.com/lines',
+            params={'year': year, 'seasonType': season_type},
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'Accept': 'application/json'
+            },
+            timeout=10
+        )
+        
+        if response.ok:
+            return jsonify(response.json())
+        else:
+            return jsonify({'error': f'CFBD API error: {response.status_code}'}), response.status_code
+            
+    except Exception as e:
+        logger.error(f"Error fetching lines: {e}")
+        return jsonify({'error': 'Failed to fetch betting lines'}), 500
 if __name__ == '__main__':
     main()

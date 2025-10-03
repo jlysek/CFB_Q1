@@ -1,9 +1,13 @@
+import os
+from dotenv import load_dotenv
 import mysql.connector
 import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
 import warnings
 warnings.filterwarnings('ignore')
+
+
 
 class CFBQuarterScorePredictor:
     
@@ -497,13 +501,15 @@ class CFBQuarterScorePredictor:
         print(f"  Draw and Over 11.5: {markets['draw_and_over_11_5']:.4f} ({markets['draw_and_over_11_5']*100:.2f}%)")
         print(f"  Draw and Over 12.5: {markets['draw_and_over_12_5']:.4f} ({markets['draw_and_over_12_5']*100:.2f}%)")
 
+# Load environment variables from .env file
+load_dotenv()
 def main():
     db_config = {
-        'host': '127.0.0.1',
-        'port': 3306,
-        'user': 'root',
-        'password': '',
-        'database': 'cfb'
+        'host': os.getenv('DB_HOST', '127.0.0.1'),
+        'port': int(os.getenv('DB_PORT', 3306)),
+        'user': os.getenv('DB_USER', 'root'),
+        'password': os.getenv('DB_PASSWORD', ''),
+        'database': os.getenv('DB_NAME', 'cfb')
     }
     
     predictor = CFBQuarterScorePredictor(db_config)

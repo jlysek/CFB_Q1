@@ -7,6 +7,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import time
 import os
+from dotenv import load_dotenv
 from typing import Dict, List, Tuple, Optional
 import warnings
 warnings.filterwarnings('ignore')
@@ -488,17 +489,21 @@ class CFBDataUpdater:
             self.connection.close()
             print("Database connection closed")
 
+load_dotenv()
+
 def main():
-    """Main execution function"""
-    # Use your actual API key
-    API_KEY = "meWCW794Y9rcfCIbk8aRXkLpI35TPBpvf8uzKg9A1yKXJBryMKqx80pETU79J4xT"
+    # Get API key from environment
+    API_KEY = os.getenv('CFBD_API_KEY')
+    
+    if not API_KEY:
+        raise ValueError("CFBD_API_KEY not found in environment variables")
     
     DB_CONFIG = {
-        'host': '127.0.0.1',
-        'port': 3306,
-        'user': 'root',
-        'password': '',
-        'database': 'cfb'
+        'host': os.getenv('DB_HOST', '127.0.0.1'),
+        'port': int(os.getenv('DB_PORT', 3306)),
+        'user': os.getenv('DB_USER', 'root'),
+        'password': os.getenv('DB_PASSWORD', ''),
+        'database': os.getenv('DB_NAME', 'cfb')
     }
     
     try:
