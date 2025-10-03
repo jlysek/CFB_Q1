@@ -406,15 +406,15 @@ class CFBQuarterScorePredictor:
                     'under_odds': prob_to_american_odds(1 - tested_total_lines[line])
                 }
         
-        draw_over_11_5 = 0.0
+        draw_over_10_5 = 0.0
         draw_over_12_5 = 0.0
         for score_combo, prob in all_probs.items():
             try:
                 home_score, away_score = map(int, score_combo.split('-'))
                 if home_score == away_score:
                     total_pts = home_score + away_score
-                    if total_pts > 11.5:
-                        draw_over_11_5 += prob
+                    if total_pts > 10.5:
+                        draw_over_10_5 += prob
                     if total_pts > 12.5:
                         draw_over_12_5 += prob
             except:
@@ -437,7 +437,7 @@ class CFBQuarterScorePredictor:
             },
             'spread': spread_lines,
             'total': total_lines,
-            'draw_and_over_11_5': draw_over_11_5,
+            'draw_and_over_10_5': draw_over_10_5,
             'draw_and_over_12_5': draw_over_12_5
         }
     
@@ -498,11 +498,12 @@ class CFBQuarterScorePredictor:
             print(f"  Line {line:.1f}: Over {tot['over']:.4f} ({tot['over']*100:.2f}%, {tot['over_odds']:+d}) | Under {tot['under']:.4f} ({tot['under']*100:.2f}%, {tot['under_odds']:+d})")
         
         print(f"\nSpecial Markets:")
-        print(f"  Draw and Over 11.5: {markets['draw_and_over_11_5']:.4f} ({markets['draw_and_over_11_5']*100:.2f}%)")
+        print(f"  Draw and Over 10.5: {markets['draw_and_over_10_5']:.4f} ({markets['draw_and_over_10_5']*100:.2f}%)")
         print(f"  Draw and Over 12.5: {markets['draw_and_over_12_5']:.4f} ({markets['draw_and_over_12_5']*100:.2f}%)")
 
 # Load environment variables from .env file
 load_dotenv()
+
 def main():
     db_config = {
         'host': os.getenv('DB_HOST', '127.0.0.1'),
