@@ -5,7 +5,7 @@ Lines: Kansas St -1.5 and total 54.5
 
 Model Output
 ![alt text](image.png)
-![alt text](image-1.png)
+![alt text](image-5.png)
 
 Fanduel Output 
 <img width="1179" height="431" alt="image" src="https://github.com/user-attachments/assets/b0e46bc7-8103-42fc-abf4-bb6dc21ec24a" />
@@ -20,7 +20,7 @@ Game 2 Colorado @ Houston, Sep 12, 2025.
 Lines: Houston -4.5 and total4 45.5 
 
 Model Output 
-![alt text](image-2.png)
+![alt text](image-4.png)
 ![alt text](image-3.png)
 
 Fanduel Output
