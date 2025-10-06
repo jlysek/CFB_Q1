@@ -113,10 +113,13 @@ Before you begin, ensure you have the following installed:
 - **MySQL 8.0 or higher** - [Download MySQL](https://dev.mysql.com/downloads/mysql/)
 - **College Football Data API Key** - [Get Free API Key](https://collegefootballdata.com/)
 
+---
+
 ### Step 1: Download the Project
 ```bash
 git clone https://github.com/jlysek/CFB_Q1.git
 cd CFB_Q1
+
 Step 2: Set Up MySQL Database
 Create the Database
 Open MySQL command line or MySQL Workbench and run:
@@ -130,9 +133,11 @@ Port (usually 3306)
 Username (usually root)
 Password (what you set during MySQL installation)
 
+
 Step 3: Install Python Dependencies
 In your terminal, navigate to the project folder and run:
 bashpip install -r requirements.txt
+
 Step 4: Configure Environment Variables
 Create a file named .env in the project root directory with the following content:
 bash# College Football Data API Key
@@ -144,6 +149,7 @@ DB_PORT=3306
 DB_USER=root
 DB_PASSWORD=your_mysql_password_here
 DB_NAME=cfb
+
 Step 5: Load Historical Data
 Run the scraper to populate your database with historical game data. This will take 10-15 minutes for the initial load:
 bashpython scraper.py
@@ -155,9 +161,11 @@ Download quarter-by-quarter scoring data
 Pull pregame betting lines
 
 You should see progress updates in the terminal. When complete, you'll see a summary showing the total number of games and quarters loaded.
+
 Step 6: Start the Prediction Server
 In a new terminal window (keep the same directory), start the Flask server:
 bashpython prediction_server.py
+
 Step 7: Access the Web Interface
 Open your web browser and navigate to:
 http://localhost:5000/interface
@@ -166,6 +174,7 @@ You should now see the CFB Quarter Predictor interface with:
 Current week's games loaded from CFBD API
 Manual prediction input fields
 SGP builder and betting markets
+
 
 Troubleshooting
 <details>

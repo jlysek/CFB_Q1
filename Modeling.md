@@ -330,7 +330,6 @@ For extremely rare scores, borrow information from similar scores:
 - 28-20 (similar total)
 
 Weight by similarity to create smoothed estimates.
-
 ---
 
 ## Putting It All Together
