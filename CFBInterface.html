@@ -340,6 +340,57 @@
             font-size: 0.8125rem; 
             border: 1px solid #262626;
         }
+        .parlay-builder {
+            background: #0a0a0a;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            border: 1px solid #1f1f1f;
+        }
+        .bet-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        .bet-option {
+            background: #141414;
+            border: 2px solid #262626;
+            padding: 0.75rem;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            text-align: center;
+        }
+        .bet-option:hover {
+            background: #1a1a1a;
+            border-color: #404040;
+        }
+        .bet-option.selected {
+            background: #15803d;
+            border-color: #22c55e;
+        }
+        .bet-option .team-name {
+            font-weight: 600;
+            font-size: 0.875rem;
+            margin-bottom: 0.25rem;
+        }
+        .bet-option .line {
+            font-size: 0.75rem;
+            color: #9ca3af;
+        }
+        .parlay-summary {
+            background: #141414;
+            padding: 1rem;
+            border-radius: 4px;
+            border: 1px solid #1f1f1f;
+            margin-top: 1rem;
+        }
+        .parlay-odds {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #22c55e;
+        }
         h3, h4 { 
             color: #f9fafb; 
             letter-spacing: -0.025em;
@@ -352,7 +403,7 @@
         <div class="container">
             <div class="header-content">
                 <div class="logo"><h1>CFB Quarter Predictor</h1></div>
-                <div class="status"><span id="status">Bayesian Q1 Score Predictions</span></div>
+                <div class="status"><span id="status">Q1 Score Predictions</span></div>
             </div>
         </div>
     </div>
@@ -380,7 +431,6 @@
                     <div class="input-group">
                         <label class="input-label">Kelly Multiplier (%)</label>
                         <input type="number" id="kellyMultiplier" class="input-field" value="25" min="1" max="100" step="1">
-                        <small style="color: #6b7280;">Recommended: 25-50% for risk management</small>
                     </div>
                 </div>
                 <button class="predict-btn" onclick="calculateKelly()">Calculate Bet Size</button>
@@ -388,7 +438,6 @@
                     <div style="margin-bottom: 0.5rem;"><strong>Kelly Bet Size:</strong> <span class="kelly-result" id="kellyAmount">0</span></div>
                     <div style="font-size: 0.875rem; color: #6b7280;">
                         <div>Expected Value: <span id="expectedValue">0%</span></div>
-                        <div>Risk of Ruin: Use fractional Kelly to manage variance</div>
                     </div>
                 </div>
             </div>
@@ -421,6 +470,8 @@
     <script>
         let currentGames = [];
         let selectedGame = null;
+        let parlaySelections = [];
+        let currentGameData = null;
     
         function calculateKelly() {
             const bankroll = parseFloat(document.getElementById('bankroll').value);
@@ -502,9 +553,8 @@
             const { startDate, endDate } = getUpcomingGamesDateRange();
             const start = new Date(startDate);
             const end = new Date(endDate);
-            document.getElementById('status').textContent = `Bayesian Q1 Score Predictions - ${season} Season`;
+            document.getElementById('status').textContent = `Q1 Score Predictions - ${season} Season`;
             document.getElementById('games-title').textContent = `Upcoming Games (${start.toLocaleDateString()} - ${end.toLocaleDateString()})`;
-            document.getElementById('debug-info').innerHTML = `<strong>Debug Info:</strong><br>Season: ${season} | Date Range: ${start.toDateString()} to ${end.toDateString()}`;
         }
     
         async function loadGames() {
@@ -669,7 +719,8 @@
             const ml2way = markets.moneyline_2way;
             const spreadMarkets = markets.spread;
             const totalMarkets = markets.total;
-            
+            currentGameData = {spread: gameSpread, total: gameTotal, homeTeam: homeTeam, awayTeam: awayTeam};
+            parlaySelections = [];
             // Format spread markets for display
             const spreadLines = Object.keys(spreadMarkets).map(line => {
                 const lineNum = parseFloat(line);
@@ -693,15 +744,42 @@
             })).sort((a, b) => a.line - b.line);
             
             predictionsContent.innerHTML = `
+                <div class="parlay-builder">
+                    <h4 style="margin-bottom: 1rem;">SGP Builder</h4>
+                    <div id="parlay-selections" style="margin-bottom: 1rem;">
+                        <div style="color: #6b7280; text-align: center;">Select bets below to build a parlay</div>
+                    </div>
+                    <div id="parlay-result" style="display: none;">
+                        <div class="parlay-summary">
+                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; text-align: center;">
+                                <div>
+                                    <div style="font-size: 0.75rem; color: #9ca3af;">Probability</div>
+                                    <div class="parlay-odds" id="parlay-prob">0%</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 0.75rem; color: #9ca3af;">Fair Odds</div>
+                                    <div class="parlay-odds" id="parlay-odds">+0</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 0.75rem; color: #9ca3af;">Decimal</div>
+                                    <div class="parlay-odds" id="parlay-decimal">0.00</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
                 <div class="prediction-content">
                     <h4 style="margin-bottom: 1rem;">1st Quarter Spread</h4>
                     <div class="spread-market">
                         ${spreadLines.map(sm => `
-                            <div class="spread-line">
+                            <div class="spread-line" style="display: grid; grid-template-columns: auto 1fr 1fr; gap: 1rem; align-items: center;">
                                 <span>Line ${sm.line >= 0 ? '+' : ''}${sm.line.toFixed(1)}</span>
-                                <span style="color: #22c55e;">Home ${(sm.favoriteProb * 100).toFixed(1)}% (${sm.favoriteOdds >= 0 ? '+' : ''}${sm.favoriteOdds})</span>
-                                <span style="color: #4b5563;">|</span>
-                                <span style="color: #f87171;">Away ${(sm.underdogProb * 100).toFixed(1)}% (${sm.underdogOdds >= 0 ? '+' : ''}${sm.underdogOdds})</span>
+                                <div onclick="toggleBetSelection('spread', 'home', ${sm.line}, '${homeTeam} ${sm.line >= 0 ? '+' : ''}${sm.line.toFixed(1)}')" style="cursor: pointer; padding: 0.5rem; background: #1a1a1a; border-radius: 4px; text-align: center; border: 2px solid #262626;">
+                                    <span style="color: #22c55e;">${homeTeam} ${(sm.favoriteProb * 100).toFixed(1)}% (${sm.favoriteOdds >= 0 ? '+' : ''}${sm.favoriteOdds})</span>
+                                </div>
+                                <div onclick="toggleBetSelection('spread', 'away', ${sm.line}, '${awayTeam} ${sm.line <= 0 ? '+' : ''}${(-sm.line).toFixed(1)}')" style="cursor: pointer; padding: 0.5rem; background: #1a1a1a; border-radius: 4px; text-align: center; border: 2px solid #262626;">
+                                    <span style="color: #f87171;">${awayTeam} ${(sm.underdogProb * 100).toFixed(1)}% (${sm.underdogOdds >= 0 ? '+' : ''}${sm.underdogOdds})</span>
+                                </div>
                             </div>
                         `).join('')}
                     </div>
@@ -709,11 +787,14 @@
                     <h4 style="margin-bottom: 1rem; margin-top: 1.5rem;">1st Quarter Total</h4>
                     <div class="total-market">
                         ${totalLines.map(tm => `
-                            <div class="total-line">
+                            <div class="total-line" style="display: grid; grid-template-columns: auto 1fr 1fr; gap: 1rem; align-items: center;">
                                 <span>Line ${tm.line.toFixed(1)}</span>
-                                <span style="color: #22c55e;">Over ${(tm.overProb * 100).toFixed(1)}% (${tm.overOdds >= 0 ? '+' : ''}${tm.overOdds})</span>
-                                <span style="color: #4b5563;">|</span>
-                                <span style="color: #f87171;">Under ${(tm.underProb * 100).toFixed(1)}% (${tm.underOdds >= 0 ? '+' : ''}${tm.underOdds})</span>
+                                <div onclick="toggleBetSelection('total', 'over', ${tm.line}, 'Over ${tm.line.toFixed(1)}')" style="cursor: pointer; padding: 0.5rem; background: #1a1a1a; border-radius: 4px; text-align: center; border: 2px solid #262626;">
+                                    <span style="color: #22c55e;">Over ${(tm.overProb * 100).toFixed(1)}% (${tm.overOdds >= 0 ? '+' : ''}${tm.overOdds})</span>
+                                </div>
+                                <div onclick="toggleBetSelection('total', 'under', ${tm.line}, 'Under ${tm.line.toFixed(1)}')" style="cursor: pointer; padding: 0.5rem; background: #1a1a1a; border-radius: 4px; text-align: center; border: 2px solid #262626;">
+                                    <span style="color: #f87171;">Under ${(tm.underProb * 100).toFixed(1)}% (${tm.underOdds >= 0 ? '+' : ''}${tm.underOdds})</span>
+                                </div>
                             </div>
                         `).join('')}
                     </div>
@@ -721,30 +802,40 @@
                     <h4 style="margin-bottom: 1rem; margin-top: 1.5rem;">2-Way Moneyline</h4>
                     <div class="market-section">
                         <div class="market-grid">
-                            <div class="market-item">
+                            <div class="market-item" onclick="toggleBetSelection('moneyline', 'home', 0, '${homeTeam} ML')" style="cursor: pointer;">
                                 <div class="market-label">${homeTeam}</div>
                                 <div class="market-value">${(ml2way.home * 100).toFixed(1)}%</div>
                                 <div style="font-size: 0.75rem; color: #6b7280;">${ml2way.home_odds >= 0 ? '+' : ''}${ml2way.home_odds}</div>
                             </div>
-                            <div class="market-item">
+                            <div class="market-item" onclick="toggleBetSelection('moneyline', 'away', 0, '${awayTeam} ML')" style="cursor: pointer;">
                                 <div class="market-label">${awayTeam}</div>
                                 <div class="market-value">${(ml2way.away * 100).toFixed(1)}%</div>
                                 <div style="font-size: 0.75rem; color: #6b7280;">${ml2way.away_odds >= 0 ? '+' : ''}${ml2way.away_odds}</div>
                             </div>
                         </div>
                     </div>
-                    
-                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem;">Draw & Over 11.5</h4>
-                    <div class="market-section" style="display: flex; justify-content: space-around; padding: 1rem;">
-                        <div style="text-align: center;">
-                            <div style="font-size: 0.875rem; color: #6b7280;">Probability</div>
-                            <div style="font-size: 1.25rem; font-weight: 700; color: #22c55e;">${(markets.draw_and_over_11_5 * 100).toFixed(1)}%</div>
-                        </div>
-                        <div style="text-align: center;">
-                            <div style="font-size: 0.875rem; color: #6b7280;">Fair Odds</div>
-                            <div style="font-size: 1.25rem; font-weight: 700;">${probabilityToAmericanOdds(markets.draw_and_over_11_5)}</div>
+
+                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem;">3-Way Moneyline</h4>
+                    <div class="market-section">
+                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem;">
+                            <div class="market-item" onclick="toggleBetSelection('moneyline_3way', 'home', 0, '${homeTeam} ML (3-way)')" style="cursor: pointer;">
+                                <div class="market-label">${homeTeam}</div>
+                                <div class="market-value">${(markets.moneyline_3way.home * 100).toFixed(1)}%</div>
+                                <div style="font-size: 0.75rem; color: #6b7280;">${markets.moneyline_3way.home_odds >= 0 ? '+' : ''}${markets.moneyline_3way.home_odds}</div>
+                            </div>
+                            <div class="market-item" onclick="toggleBetSelection('moneyline_3way', 'draw', 0, 'Draw')" style="cursor: pointer;">
+                                <div class="market-label">Draw</div>
+                                <div class="market-value">${(markets.moneyline_3way.draw * 100).toFixed(1)}%</div>
+                                <div style="font-size: 0.75rem; color: #6b7280;">${markets.moneyline_3way.draw_odds >= 0 ? '+' : ''}${markets.moneyline_3way.draw_odds}</div>
+                            </div>
+                            <div class="market-item" onclick="toggleBetSelection('moneyline_3way', 'away', 0, '${awayTeam} ML (3-way)')" style="cursor: pointer;">
+                                <div class="market-label">${awayTeam}</div>
+                                <div class="market-value">${(markets.moneyline_3way.away * 100).toFixed(1)}%</div>
+                                <div style="font-size: 0.75rem; color: #6b7280;">${markets.moneyline_3way.away_odds >= 0 ? '+' : ''}${markets.moneyline_3way.away_odds}</div>
+                            </div>
                         </div>
                     </div>
+        
                     
                     <h4 style="margin-bottom: 1rem; margin-top: 1.5rem;">Draw & Over 12.5</h4>
                     <div class="market-section" style="display: flex; justify-content: space-around; padding: 1rem;">
@@ -777,6 +868,98 @@
             updateStatus();
             loadGames();
         });
+
+        function toggleBetSelection(type, team, line, displayText) {
+            const selectionKey = `${type}-${team}-${line}`;
+            
+            // For totals, team is actually 'over' or 'under', so we need to handle differently
+            let existingIndex;
+            if (type === 'total') {
+                existingIndex = parlaySelections.findIndex(s => 
+                    s.type === type && s.team === team && s.line === line
+                );
+            } else {
+                existingIndex = parlaySelections.findIndex(s => 
+                    s.type === type && s.team === team && (type === 'spread' ? s.line === line : true)
+                );
+            }
+            
+            if (existingIndex >= 0) {
+                parlaySelections.splice(existingIndex, 1);
+            } else {
+                parlaySelections.push({
+                    type: type,
+                    team: team,
+                    line: line,
+                    display: displayText
+                });
+            }
+            
+            updateParlayDisplay();
+            calculateParlay();
+        }
+
+        function updateParlayDisplay() {
+            const container = document.getElementById('parlay-selections');
+            if (parlaySelections.length === 0) {
+                container.innerHTML = '<div style="color: #6b7280; text-align: center;">Select bets to build a parlay</div>';
+                document.getElementById('parlay-result').style.display = 'none';
+                return;
+            }
+            
+            container.innerHTML = parlaySelections.map((sel, i) => `
+                <div style="background: #1a1a1a; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;">
+                    <span>${sel.display}</span>
+                    <button onclick="removeParlaySelection(${i})" style="background: #7f1d1d; color: white; border: none; padding: 0.25rem 0.5rem; border-radius: 3px; cursor: pointer;">Remove</button>
+                </div>
+            `).join('');
+        }
+
+        function removeParlaySelection(index) {
+            parlaySelections.splice(index, 1);
+            updateParlayDisplay();
+            calculateParlay();
+        }
+
+        async function calculateParlay() {
+            if (parlaySelections.length === 0 || !currentGameData) {
+                return;
+            }
+            
+            const selections = parlaySelections.map(sel => {
+                const obj = {type: sel.type};
+                if (sel.type === 'spread' || sel.type === 'moneyline' || sel.type === 'moneyline_3way') {
+                    obj.team = sel.team;
+                    if (sel.type === 'spread') obj.line = sel.line;
+                } else if (sel.type === 'total') {
+                    obj.side = sel.team; // 'over' or 'under'
+                    obj.line = sel.line;
+                }
+                return obj;
+            });
+            
+            try {
+                const response = await fetch('/api/calculate-parlay', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        spread: currentGameData.spread,
+                        total: currentGameData.total,
+                        selections: selections
+                    })
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    document.getElementById('parlay-result').style.display = 'block';
+                    document.getElementById('parlay-prob').textContent = `${(result.probability * 100).toFixed(2)}%`;
+                    document.getElementById('parlay-odds').textContent = result.fair_odds >= 0 ? `+${result.fair_odds}` : result.fair_odds;
+                    document.getElementById('parlay-decimal').textContent = result.decimal_odds.toFixed(2);
+                }
+            } catch (error) {
+                console.error('Parlay calculation error:', error);
+            }
+        }
     </script>
 </body>
 </html>

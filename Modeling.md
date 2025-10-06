@@ -1,296 +1,273 @@
-# Statistical Methodology Guide
+# Statistical Methodology
 
-A complete breakdown of the statistical methods used in the College Football Quarter Scoring Prediction Model. This guide assumes no advanced statistics background and builds concepts from the ground up.
-
-## Table of Contents
-1. [The Big Picture](#the-big-picture)
-2. [Understanding Probability Distributions](#understanding-probability-distributions)
-3. [What is Bayesian Statistics?](#what-is-bayesian-statistics)
-4. [Building the Prior Distribution](#building-the-prior-distribution)
-5. [Multinomial Logistic Regression](#multinomial-logistic-regression)
-6. [Regularization and Overfitting](#regularization-and-overfitting)
-7. [Putting It All Together](#putting-it-all-together)
-8. [Worked Example](#worked-example)
+This is my attempt to breakdown the statistical methods used in the College Football Quarter Scoring Prediction Model as clearly as possible.
 
 ---
 
-## The Big Picture
+## Table of Contents
 
-### What Are We Trying To Do?
+- [Overview](#overview)
+- [Understanding Probability Distributions](#understanding-probability-distributions)
+  - [Empirical vs Model-Based Distributions](#empirical-vs-model-based-distributions)
+- [Building the Empirical Distribution](#building-the-empirical-distribution)
+- [Multinomial Logistic Regression](#multinomial-logistic-regression)
+  - [Part 1: Understanding Logistic Functions](#part-1-understanding-logistic-functions)
+  - [Part 2: Simple Logistic Regression](#part-2-simple-logistic-regression)
+  - [Part 3: Multinomial Logistic Regression](#part-3-multinomial-logistic-regression)
+  - [Part 4: Making Predictions with Softmax](#part-4-making-predictions-with-softmax)
+  - [Part 5: Training the Model](#part-5-training-the-model)
+  - [Part 6: Feature Normalization](#part-6-feature-normalization)
+- [Regularization and Overfitting](#regularization-and-overfitting)
+- [Putting It All Together](#putting-it-all-together)
+- [Worked Example](#worked-example)
 
-We want to answer this question: **"Given what betting markets think about a game (the spread and total), what is the probability of every possible first quarter score?"**
+---
 
-For example:
-- Spread: Home team favored by 7.5 points
-- Total: 58.5 points expected in the full game
-- Question: What's the probability Q1 ends 7-0? 14-7? 0-0? 21-3?
+## Overview
 
-### Why Is This Hard?
+**Goal:** Given pregame closing betting markets (spread and total), what is the probability of every possible first quarter score?
 
-There are hundreds of possible Q1 score combinations, and we need to assign a probability to each one that:
-1. Makes sense given the pregame betting line
-2. Reflects historical scoring patterns
-3. Sums to exactly 100% across all possibilities
+### Example
 
-### Our Solution: Bayesian Statistics
+- **Spread:** Home team favored by 7.5 points
+- **Total:** 58.5 points expected in the full game
+- **Question:** What's the probability Q1 ends 7-7? 14-7? 0-0? 7-3?
 
-Instead of trying to predict scores from scratch, we start with historical patterns (what normally happens) and update those patterns based on new information (the betting market's opinion of this specific game).
+### Regularized Supervised Learning
+
+Use multinomial logistic regression to directly model `P(Score | Spread, Total)`. Apply regularization to prevent overfitting, especially for rare scores.
+
+The model learns which scores correlate with which betting lines from historical games, while regularization keeps predictions reasonable for scores with limited data.
 
 ---
 
 ## Understanding Probability Distributions
 
-### What is a Probability Distribution?
+A probability distribution assigns a probability to every possible outcome. Probabilities must sum to exactly 1 (or 100%).
 
-A probability distribution assigns a probability to every possible outcome. The probabilities must sum to exactly 1 (or 100%).
+### Simple Example - Rolling a Die
 
-**Simple Example - Rolling a Die:**
-```
-Outcome:     1    2    3    4    5    6
-Probability: 1/6  1/6  1/6  1/6  1/6  1/6
-Total:       1.0 (or 100%)
-```
+| Outcome | Probability |
+|---------|-------------|
+| 1 | 1/6 |
+| 2 | 1/6 |
+| 3 | 1/6 |
+| 4 | 1/6 |
+| 5 | 1/6 |
+| 6 | 1/6 |
+| **Total** | **1.0 (100%)** |
 
-**Our Example - Q1 Scores:**
-```
-Score:       0-0   3-0   7-0   0-3   7-3   ...  (hundreds of possibilities)
-Probability: 0.08  0.05  0.12  0.04  0.03  ...
-Total:       1.0 (or 100%)
-```
+### Conditional Probability Example
+P(x > 4) = P(5) + P(6) = 1/6 + 1/6 = 2/6 = 1/3
+P(x > 4 | x is even) = "Probability x is greater than 4 GIVEN x is even"
 
-### Empirical vs Theoretical Distributions
+Since x is even, possible outcomes shrink to: `{2, 4, 6}`
+P(x > 4 | x is even) = P(6) / P(2,4,6) = (1/6) / (3/6) = 1/3
 
-**Empirical Distribution:** Built from real data
+> The "|" symbol means "given" in probability notation
+
+### Our Example - Q1 Scores
+
+| Score | Probability |
+|-------|-------------|
+| 0-0 | 0.062 |
+| 3-0 | 0.038 |
+| 7-0 | 0.098 |
+| 0-3 | 0.023 |
+| 7-3 | 0.037 |
+| ... | ... |
+| **Total** | **1.0 (100%)** |
+
+---
+
+## Empirical vs Model-Based Distributions
+
+### Empirical Distribution: Built from real data
 - Count how often each outcome happened historically
 - Turn counts into percentages
-- Example: In 6,000 games, Q1 ended 7-0 in 720 games = 12% probability
+- **Example:** In 6,000 games, Q1 ended 7-0 in 720 games = 12% probability
 
-**Theoretical Distribution:** Based on assumptions or models
+### Theoretical Distribution: Based on assumptions or models
 - Use mathematical formulas to assign probabilities
-- Example: Normal distribution, exponential distribution
-- We use a hybrid approach: start empirical, then adjust with models
+- **Example:** Normal distribution, exponential distribution
+
+**We use both:** Start with empirical frequencies, then train models that adjust predictions based on game characteristics.
 
 ---
 
-## What is Bayesian Statistics?
-
-### The Core Concept
-
-Bayesian statistics is about updating beliefs with new evidence. Start with what you know, then adjust when you learn more.
-
-**Real Life Example:**
-- **Prior belief:** "There's a 50% chance it will rain today" (based on this month's average)
-- **New evidence:** You see dark clouds forming
-- **Updated belief:** "There's an 80% chance it will rain today"
-
-### The Bayesian Formula
-
-```
-P(Hypothesis | Evidence) = [P(Hypothesis) × P(Evidence | Hypothesis)] / P(Evidence)
-```
-
-**Breaking this down:**
-- **P(Hypothesis | Evidence):** Probability of hypothesis GIVEN the evidence (what we want)
-- **P(Hypothesis):** Probability of hypothesis BEFORE seeing evidence (our prior)
-- **P(Evidence | Hypothesis):** Probability of seeing this evidence IF the hypothesis is true (likelihood)
-- **P(Evidence):** Probability of seeing this evidence overall (normalizing constant)
-
-### Our Application
-
-```
-P(Q1 Score | Spread & Total) = [P(Q1 Score) × P(Spread & Total | Q1 Score)] / P(Spread & Total)
-```
-
-**In plain English:**
-- **What we want:** Probability of a specific Q1 score given the betting line
-- **Prior:** Historical probability of that Q1 score (from 10+ years of data)
-- **Likelihood:** If Q1 did end with that score, how likely would we see this betting line?
-- **Evidence:** How common is this betting line overall? (ensures probabilities sum to 1)
-
----
-
-## Building the Prior Distribution
+## Building the Empirical Distribution
 
 ### Step 1: Collect Historical Data
 
-We have every FBS college football game since 2014 - over 6,000 games with Q1 scores.
+Every FBS college football game since 2014 with Q1 scores.
 
 ### Step 2: Count Score Occurrences
 
-```
-Score   Count   Percentage
-0-0     480     8.0%
-7-0     720     12.0%
-7-3     180     3.0%
-14-7    120     2.0%
-...
-```
+From the actual model output (at time of writing):
 
-### Step 3: Create the Prior
+| Score | Count | Percentage |
+|-------|-------|------------|
+| 7-0 | 765 | 11.0% |
+| 7-7 | 528 | 7.6% |
+| 0-7 | 490 | 7.1% |
+| 0-0 | 490 | 7.1% |
+| 14-0 | 460 | 6.5% |
+| 3-0 | 320 | 4.5% |
+| ... | ... | ... |
 
-This becomes our **prior distribution** - what we expect when we know nothing about a specific game. It represents the "average" Q1 in college football.
+### Step 3: Use as Training Foundation
 
-**Key Insight:** Some scores are naturally more common (7-0, 0-0, 14-7) while others are rare (21-17, 28-3). Our prior captures these natural patterns.
+This empirical distribution serves two purposes:
 
-### Why This Matters
-
-Without any information about a game, we should predict scores proportional to how often they actually happen. A 7-0 Q1 is much more common than a 28-14 Q1, and our prior reflects this.
+1. **Training target:** The model learns to predict these historical patterns
+2. **Regularization anchor:** Prevents wild predictions for rare scores
 
 ---
 
 ## Multinomial Logistic Regression
 
-This is the heart of our model and requires the most explanation. We'll build up the concept step by step.
+This is the core of our prediction model.
 
-### What Problem Does It Solve?
+**We need to predict:** Given a spread and total, what is the probability of each possible Q1 score?
 
-We need to figure out: **Given a Q1 score, what spread and total would we expect to see?**
-
-This seems backwards, but it's necessary for Bayesian updating. We need P(Spread & Total | Score) to calculate P(Score | Spread & Total).
+This is a classification problem with hundreds of possible classes (each unique score combination).
 
 ### Part 1: Understanding Logistic Functions
 
 #### From Probability to Logit
 
-**Problem:** Regression models work best with numbers that can range from negative infinity to positive infinity. Probabilities are trapped between 0 and 1.
+Regression works best with numbers ranging from -∞ to +∞. Probabilities are constrained between 0 and 1.
 
-**Solution:** Transform probabilities using the logit function.
-
-```
+So we transform the probabilities using the **logit function**:
 logit(p) = log(p / (1-p))
-```
 
 **What this does:**
 
 | Probability | Logit Value | Interpretation |
 |-------------|-------------|----------------|
-| 0.01 (1%)   | -4.6        | Very unlikely |
-| 0.10 (10%)  | -2.2        | Unlikely |
-| 0.50 (50%)  | 0.0         | Even odds |
-| 0.90 (90%)  | +2.2        | Likely |
-| 0.99 (99%)  | +4.6        | Very likely |
+| 0.01 (1%) | -4.6 | Very unlikely |
+| 0.10 (10%) | -2.2 | Unlikely |
+| 0.50 (50%) | 0.0 | Even odds |
+| 0.90 (90%) | +2.2 | Likely |
+| 0.99 (99%) | +4.6 | Very likely |
 
-Now we can work with numbers from -∞ to +∞, which regression loves.
+Now we can work with unbounded numbers, which regression handles well.
 
 #### From Logit Back to Probability
 
 The inverse operation:
-```
 p = exp(logit) / (1 + exp(logit))
-```
 
-This is called the **logistic function** and it maps any number back to a probability between 0 and 1.
+This is the **logistic function** - it maps any number back to a probability between 0 and 1.
+
+---
 
 ### Part 2: Simple Logistic Regression
 
-Before multinomial, let's understand regular logistic regression.
+Before multinomial, understand regular logistic regression.
 
 **Example Goal:** Predict if home team wins based on spread.
-
-```
 logit(p_win) = β₀ + β₁ × spread
-```
 
-**What the coefficients mean:**
-- **β₀ (intercept):** Probability of winning when spread is 0 (pick'em game)
-- **β₁ (slope):** How much probability changes per point of spread
+**What coefficients mean:**
+- `β₀` (intercept): Baseline log-odds when spread is 0 for home team
+- `β₁` (slope): How spread affects win probability
 
 **Example with learned values:**
-```
 logit(p_win) = 0.0 + 0.3 × spread
 
-Spread = -7 (home favored):  logit = -2.1  →  p_win = 0.89 (89%)
-Spread = 0 (pick'em):        logit = 0.0   →  p_win = 0.50 (50%)
-Spread = +7 (home underdog): logit = +2.1  →  p_win = 0.11 (11%)
-```
+| Scenario | Calculation | Result |
+|----------|-------------|--------|
+| Spread = -7 (home favored) | logit = -2.1 | p_win = 0.11 (11%) |
+| Spread = 0 (pick'em) | logit = 0.0 | p_win = 0.50 (50%) |
+| Spread = +7 (home underdog) | logit = +2.1 | p_win = 0.89 (89%) |
 
-**Learning the coefficients:** We use historical data where we know both the spread and the outcome. An optimization algorithm finds the β values that best predict the observed outcomes.
+---
 
 ### Part 3: Multinomial Logistic Regression
 
-Now extend this to many possible outcomes (all the different Q1 scores).
+**Multinomial** = consisting of several terms. Extend this to many possible outcomes (all different Q1 scores).
 
 #### The Setup
 
-Instead of predicting one probability, we predict a probability for each possible score simultaneously. Each score gets its own logit equation.
+Instead of predicting one probability, we predict a probability for each possible score. Each score gets its own logit equation.
 
-**For each score, we model:**
-```
+**For each score:**
 logit(score) = β₀ + β₁ × spread + β₂ × total + β₃ × spread² + β₄ × total²
-```
 
-**Why 5 coefficients per score?**
-1. **β₀:** Baseline - how common is this score regardless of betting line?
-2. **β₁:** Spread effect - does a bigger spread favor this score?
-3. **β₂:** Total effect - do higher totals make this score more likely?
-4. **β₃:** Non-linear spread effect - relationship may not be linear
-5. **β₄:** Non-linear total effect - relationship may not be linear
+**5 coefficients per score:**
+
+1. `β₀`: Baseline - probability when spread and total are zero
+2. `β₁`: Spread effect - How a 1-point change in spread affects this score's probability
+3. `β₂`: Total effect - How a 1-point change in total affects this score's probability
+4. `β₃`: Non-linear spread effect - Captures non-linear spread effects
+5. `β₄`: Non-linear total effect - Captures non-linear total effects
 
 #### Why Quadratic Terms (spread² and total²)?
 
-Relationships aren't always linear. Consider the move from spread of 3 to spread of 6 - this is huge (changes the game dynamic significantly). But the move from spread of 33 to 36? Much less meaningful.
+Relationships aren't always linear. Consider:
 
-Quadratic terms capture this: they allow the effect of spread to change depending on how large the spread already is.
+- Spread moving from -2.5 to -5.5: **Huge impact**
+- Spread moving from -29.5 to -32.5: **Minimal impact**
+
+Quadratic terms capture this: they allow effects to vary based on the input magnitude.
 
 **Visual Example:**
-```
 Linear effect:     Each point of spread matters equally
-Quadratic effect:  Points matter more when spread is small, less when it's large
-```
+Quadratic effect:  Early points matter more than later points
 
-### Part 4: Making Predictions
+---
 
-Let's say we have 300 possible Q1 scores. For each one, we calculate:
+### Part 4: Making Predictions with Softmax
 
-```
+For 300 possible Q1 scores, calculate logits for each:
 logit_score1 = β₀₁ + β₁₁ × spread + β₂₁ × total + β₃₁ × spread² + β₄₁ × total²
 logit_score2 = β₀₂ + β₁₂ × spread + β₂₂ × total + β₃₂ × spread² + β₄₂ × total²
 ...
 logit_score300 = β₀₃₀₀ + β₁₃₀₀ × spread + β₂₃₀₀ × total + β₃₃₀₀ × spread² + β₄₃₀₀ × total²
-```
 
-Then convert to probabilities using softmax (a generalized logistic function):
-
-```
+**Convert to probabilities using softmax:**
 p(score_i) = exp(logit_i) / sum(exp(logit_j) for all j)
-```
 
 This ensures all probabilities sum to exactly 1.
 
+---
+
 ### Part 5: Training the Model
 
-**Input data:** Historical games with Q1 scores, spread, and total
+**Input:** Historical games with Q1 scores, spreads, and totals
 
 **Process:**
-1. For each possible score, create a binary variable (1 if this was the actual Q1 score, 0 otherwise)
-2. Use optimization to find β coefficients that maximize likelihood
-3. The model learns which scores are associated with which betting lines
 
-**Key Insight:** A 14-0 Q1 score correlates with larger spreads and moderate totals. A 3-3 score correlates with small spreads and lower totals. The coefficients capture these patterns mathematically.
+1. For each score, create a binary indicator (1 if actual score, 0 otherwise)
+2. Use optimization to find β coefficients that maximize log-likelihood
+3. Apply regularization to prevent overfitting (see next section)
 
-### Part 6: Normalization
+**What the model learns:**
 
-Before running regression, we normalize spread and total:
-```
+- 14-0 scores correlate with large spreads and moderate totals
+- 3-3 scores correlate with small spreads and lower totals
+
+---
+
+### Part 6: Feature Normalization
+
+Before regression, we normalize inputs:
 normalized_value = (actual_value - mean) / standard_deviation
-```
 
 **Why normalize?**
-- Spread ranges from -40 to +40
-- Total ranges from 30 to 100
-- Without normalization, total would dominate because its numbers are bigger
-- Normalization puts both on the same scale
+
+- Spread ranges: -40 to +40
+- Total ranges: 30 to 100
+- Without normalization, total dominates due to larger magnitude
+- Normalization puts both on equal footing
 
 **Example:**
-```
-Raw:        spread = -14,  total = 58
-Mean:       spread = 0,    total = 60
-Std Dev:    spread = 12,   total = 10
 
-Normalized: spread = -1.17, total = -0.20
-```
-
-Now both variables contribute proportionally to the model.
+| Feature | Raw | Mean | Std Dev | Normalized |
+|---------|-----|------|---------|------------|
+| Spread | -14 | 0 | 12 | -1.17 |
+| Total | 58 | 60 | 10 | -0.20 |
 
 ---
 
@@ -298,66 +275,61 @@ Now both variables contribute proportionally to the model.
 
 ### The Overfitting Problem
 
-**Scenario:** Only 5 games in history ended Q1 with a score of 24-17.
+**Scenario:** Only 5 games in history ended Q1 with score 24-17.
 
-**Problem:** With so little data, the model might learn spurious patterns:
-- "Games ending 24-17 always have totals between 67.5 and 69.5"
-- This is probably just random chance, not a real pattern
+**Problem:** With limited data, the model might learn random noise:
+- "24-17 games always have totals between 67.5-69.5"
+- This is likely coincidence, not a real pattern
 
-**Result:** The model makes wild, overconfident predictions for rare scores.
+**Result:** Wild, overconfident predictions for rare scores.
 
 ### The Solution: L2 Regularization
 
-Add a penalty term to the loss function that discourages extreme coefficient values:
-
-```
+Add a penalty for extreme coefficients:
 Loss = -LogLikelihood + λ × ||β - β_prior||²
-```
 
-**Breaking this down:**
+**Components:**
 
-**-LogLikelihood:** How well the model fits the training data (we want to minimize this)
-
-**λ:** Regularization strength (higher = more penalty)
-
-**||β - β_prior||²:** Distance between learned coefficients and prior coefficients
+- `-LogLikelihood`: How well the model fits training data (minimize this)
+- `λ`: Regularization strength (higher = more penalty)
+- `||β - β_prior||²`: Distance from prior coefficients
 
 ### How It Works
 
-Instead of letting coefficients go anywhere, we pull them toward "prior" values that make sense based on the empirical distribution.
+Pull coefficients toward sensible "prior" values based on empirical frequencies.
 
 **For common scores (lots of data):**
 - Low λ (weak regularization)
 - Model learns mostly from data
-- Coefficients can deviate significantly from prior
+- Can deviate from prior
 
 **For rare scores (little data):**
 - High λ (strong regularization)
 - Model stays close to prior
-- Prevents wild predictions from limited data
+- Prevents overfitting
 
 ### Adaptive Regularization
+λ_score = base_λ × (1 / √count_score)
 
-```
-λ_score = base_lambda × (1 / sqrt(count_score))
-```
+Rare scores automatically get stronger regularization.
 
-Scores with fewer observations get stronger regularization automatically.
+**Example:**
+
+| Score Occurrences | Calculation | λ Value | Strength |
+|-------------------|-------------|---------|----------|
+| 600 | 0.1 × (1/√600) | 0.004 | Weak |
+| 5 | 0.1 × (1/√5) | 0.045 | Strong |
 
 ### Distance-Based Smoothing
 
-For extremely rare scores, we also borrow information from similar scores:
+For extremely rare scores, borrow information from similar scores:
 
-```
-If score 28-17 is very rare, borrow from:
+**If 28-17 is very rare, borrow from:**
 - 28-14 (similar home score)
-- 24-17 (similar away score)  
+- 24-17 (similar away score)
 - 28-20 (similar total)
-```
 
-**Method:** Weight nearby scores by similarity, create a smoothed estimate.
-
-This prevents the model from having "holes" in its predictions where it has no idea what to predict.
+Weight by similarity to create smoothed estimates.
 
 ---
 
@@ -365,180 +337,90 @@ This prevents the model from having "holes" in its predictions where it has no i
 
 ### The Complete Pipeline
 
-**Step 1: Calculate Prior**
-```
-For each possible Q1 score:
+#### Step 1: Calculate Empirical Distribution
+```python
+For each Q1 score:
     prior_prob[score] = count[score] / total_games
-```
-
-**Step 2: Train Multinomial Logistic Regression**
-```
-For each possible Q1 score:
+Step 2: Train Regularized Models
+pythonFor each Q1 score:
     Learn coefficients β₀, β₁, β₂, β₃, β₄
-    Apply regularization based on score frequency
-    Store learned model
-```
-
-**Step 3: Make Predictions**
-```
+    Apply adaptive regularization based on frequency
+    Store trained model
+Step 3: Make Predictions
 Given: spread = -7.5, total = 58.5
-
-For each possible score:
+pythonFor each possible score:
     # Normalize inputs
-    norm_spread = (spread - mean_spread) / std_spread
-    norm_total = (total - mean_total) / std_total
+    norm_spread = (spread - mean) / std
+    norm_total = (total - mean) / std
     
-    # Calculate logit
+    # Calculate raw logit
     logit[score] = β₀ + β₁×norm_spread + β₂×norm_total 
                    + β₃×norm_spread² + β₄×norm_total²
     
-    # Get likelihood from logistic regression
-    likelihood[score] = exp(logit[score]) / sum(exp(all logits))
-    
-    # Combine with prior using Bayes
-    numerator[score] = prior[score] × likelihood[score]
+    # Convert to raw probability
+    raw_prob[score] = exp(logit[score])
 
-# Normalize to get final probabilities
+# Normalize with softmax
 For each score:
-    final_prob[score] = numerator[score] / sum(all numerators)
-```
+    final_prob[score] = raw_prob[score] / sum(all raw_probs)
+Step 4: Output Distribution
+ScoreEmpiricalAdjustedFinal %7-011.0%→9.8%7-77.6%→9.8%0-77.1%→6.9%............
 
-**Step 4: Output Probability Distribution**
-```
-Score   Prior   Likelihood   Posterior
-0-0     0.080   0.024       0.042
-7-0     0.120   0.089       0.185
-7-3     0.030   0.041       0.027
-...
-```
+Worked Example
+Let's walk through a complete prediction with real numbers.
+Given Information
+Game Parameters:
 
----
+Spread: -2.5 (home team favored by 2.5 points)
+Total: 57.5
 
-## Worked Example
 
-Let's walk through a complete example with real numbers.
+Prediction Output
+================================================================================
+PREDICTION: Spread -2.5, Total 57.5
+================================================================================
+Probability Adjustment Analysis (Top 15 Scores)
+ScoreEmpiricalAdjustedChangeFinal %7-70.0760260.102450+0.02642410.25%7-00.1101510.091173-0.0189799.12%0-70.0705540.082379+0.0118258.24%0-00.0706980.067480-0.0032196.75%7-30.0410370.050209+0.0091725.02%14-70.0358530.043866+0.0080134.39%3-70.0331170.042057+0.0089404.21%10-00.0368610.041124+0.0042634.11%3-00.0462200.040266-0.0059544.03%14-00.0666670.036943-0.0297233.69%7-140.0231820.034230+0.0110483.42%0-140.0309580.032289+0.0013313.23%0-30.0311020.027493-0.0036092.75%10-70.0200140.024419+0.0044042.44%0-100.0192940.022476+0.0031812.25%
 
-### Given Information
-- **Spread:** Home team favored by 7.5 points (-7.5)
-- **Total:** 58.5 points
-- **Goal:** Find probability of Q1 ending 7-0 (home team leads)
+Scores with Probability ≥ 0.5%
+ScoreProbabilityPercentage7-70.10245010.25%7-00.0911739.12%0-70.0823798.24%0-00.0674806.75%7-30.0502095.02%14-70.0438664.39%3-70.0420574.21%10-00.0411244.11%3-00.0402664.03%14-00.0369433.69%7-140.0342303.42%0-140.0322893.23%0-30.0274932.75%10-70.0244192.44%0-100.0224762.25%7-100.0222052.22%3-30.0196501.97%14-30.0179321.79%14-140.0160711.61%21-70.0117271.17%21-00.0108551.09%3-100.0093020.93%3-140.0092080.92%7-60.0087110.87%6-70.0082780.83%14-100.0081000.81%10-30.0079480.79%17-00.0076800.77%0-60.0075130.75%6-00.0071160.71%13-00.0063400.63%7-210.0051650.52%
 
-### Step 1: Prior Probability
+Betting Markets
+2-Way Moneyline (Draws Void)
+TeamProbabilityPercentageOddsHome0.572457.24%-133Away0.427642.76%+133
+3-Way Moneyline
+TeamProbabilityPercentageOddsHome0.453345.33%+120Draw0.208020.80%+380Away0.338733.87%+195
+Spread Markets
+LineHome CoverHome OddsAway CoverAway Odds+2.567.13%-20432.87%+204+1.566.99%-20233.01%+202+0.566.13%-19533.87%+195-0.545.33%+12054.67%-120-1.544.32%+12555.68%-125-2.544.11%+12655.89%-126-3.536.89%+17163.11%-171
+Total Markets
+LineOver ProbOver OddsUnder ProbUnder Odds8.565.58%-19034.42%+1909.564.44%-18135.56%+18110.548.86%+10451.14%-10411.548.83%+10451.17%-10412.548.76%+10551.24%-105
+Special Markets
+MarketProbabilityPercentageDraw and Over 10.50.120912.09%Draw and Over 12.50.120812.08%
 
-From historical data:
-```
-P(7-0) = 720 / 6000 = 0.12 (12%)
-```
+Key Observations
 
-Out of 6,000 games, 720 ended Q1 with a 7-0 score.
+7-7 is most likely (10.25%) - makes sense given the small spread and moderate total
+Model adjusts empirical probabilities - 7-7 jumped from 7.6% to 10.25%, while 14-0 dropped from 6.7% to 3.7%
+Home team slightly favored - 57.24% probability to outscore in Q1 (after removing draws)
+High draw probability - 20.80% chance of a tied first quarter
+Betting lines derived from distribution - All markets calculated directly from score probabilities
 
-### Step 2: Normalize Inputs
 
-```
-Historical averages: mean_spread = 0, std_spread = 10
-                    mean_total = 60, std_total = 8
+Understanding Softmax
+The softmax function is crucial for multinomial logistic regression. Here's why:
+The Problem
+After calculating logits for all possible scores, we need to convert them to probabilities that:
 
-norm_spread = (-7.5 - 0) / 10 = -0.75
-norm_total = (58.5 - 60) / 8 = -0.19
-```
+Are all between 0 and 1
+Sum to exactly 1
 
-### Step 3: Calculate Likelihood
+The Solution
+p(score_i) = exp(logit_i) / Σ exp(logit_j) for all j
+What this does:
 
-Learned coefficients for 7-0 score (these come from training):
-```
-β₀ = -2.1   (intercept)
-β₁ = -0.4   (spread effect)
-β₂ = 0.15   (total effect)
-β₃ = -0.05  (spread² effect)
-β₄ = 0.02   (total² effect)
-```
+exp(logit_i) converts each logit to a positive number
+Dividing by the sum normalizes so all probabilities sum to 1
+Higher logits → higher probabilities
 
-Calculate logit:
-```
-logit = -2.1 + (-0.4)×(-0.75) + (0.15)×(-0.19) 
-        + (-0.05)×(-0.75)² + (0.02)×(-0.19)²
-      = -2.1 + 0.30 - 0.029 - 0.028 + 0.001
-      = -1.86
-```
-
-Convert to probability using softmax (assuming sum of all exp(logits) = 45.2):
-```
-likelihood = exp(-1.86) / 45.2 = 0.156 / 45.2 = 0.0035
-```
-
-**Interpretation:** Given the betting line (home favored by 7.5), we'd see a 7-0 Q1 score about 0.35% of the time according to our likelihood model.
-
-### Step 4: Apply Bayes' Rule
-
-```
-Numerator = Prior × Likelihood
-          = 0.12 × 0.0035
-          = 0.00042
-```
-
-Do this for all 300+ possible scores, then normalize:
-```
-Sum of all numerators = 0.0485
-
-Posterior probability = 0.00042 / 0.0485 = 0.0087 (0.87%)
-```
-
-### Step 5: Interpret Result
-
-**Prior:** 12% (before seeing betting line)
-**Posterior:** 0.87% (after seeing betting line)
-
-**Why did it drop?**
-- A 7-0 score means a one-score lead
-- But the spread is 7.5 points, meaning we expect the home team to dominate
-- A 7-0 Q1 doesn't reflect enough home team dominance for this spread
-- More likely Q1 scores: 14-0, 10-0, 14-3 (bigger home leads)
-
-The model correctly reduced the probability of 7-0 because it doesn't align well with the betting market's expectation of a blowout.
-
----
-
-## Key Takeaways
-
-### For the Non-Technical Reader
-
-1. **We start with history:** What normally happens in Q1?
-2. **We update with information:** How does this specific game differ from average?
-3. **We use sophisticated math:** To combine these two pieces of information optimally
-4. **We get probabilities:** Not just one prediction, but how likely every possible outcome is
-
-### For the Technical Reader
-
-1. **Bayesian framework** naturally combines prior knowledge with observed evidence
-2. **Multinomial logistic regression** models the relationship between game characteristics and scoring outcomes
-3. **Regularization** prevents overfitting and stabilizes predictions for rare events
-4. **Normalization and polynomial features** improve model performance and capture non-linear relationships
-
-### Why This Approach is Powerful
-
-- **Probabilistic:** Provides full distribution, not just point estimates
-- **Data-driven:** Learns from 10+ years of actual games
-- **Adaptive:** Automatically adjusts for common vs rare scores
-- **Interpretable:** Each component has clear statistical meaning
-- **Extensible:** Can easily add new features (weather, coaching tendencies, etc.)
-
----
-
-## Further Reading
-
-### Probability and Statistics
-- **Bayesian Statistics:** "Doing Bayesian Data Analysis" by John Kruschke
-- **Logistic Regression:** "An Introduction to Statistical Learning" by James et al.
-
-### Regularization
-- **Ridge Regression (L2):** ESL Chapter 3, Hastie et al.
-- **Bias-Variance Tradeoff:** Understanding overfitting vs underfitting
-
-### Sports Analytics
-- **NFL Modeling:** FiveThirtyEight's Elo ratings
-- **Expected Goals (xG):** Soccer analytics frameworks
-- **Win Probability:** Baseball's WPA (Win Probability Added)
-
----
-
-*This methodology guide is designed to make advanced statistical modeling accessible. Questions and suggestions for improvement are welcome.*
+Numerical Example
+ScoreLogitexp(logit)Probability7-72.07.397.39/20.09 = 0.3687-01.54.484.48/20.09 = 0.2230-71.02.722.72/20.09 = 0.1350-00.51.651.65/20.09 = 0.082Others...3.853.85/20.09 = 0.192Sum-20.091.000

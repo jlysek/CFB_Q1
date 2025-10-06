@@ -13,11 +13,11 @@ import traceback
 import os
 from dotenv import load_dotenv
 import requests
-# Import Bayesian model
+# Import model
 try:
-    from bayesQ1 import CFBQuarterScorePredictor
+    from Q1 import CFBQuarterScorePredictor
 except ImportError:
-    print("ERROR: Could not import bayesQ1.py")
+    print("ERROR: Could not import Q1.py")
     sys.exit(1)
 
 # Configure logging
@@ -46,7 +46,7 @@ predictor_initialized = False
 initialization_error = None
 
 def initialize_predictor():
-    """Initialize the Bayesian predictor model at server startup"""
+    """Initialize the predictor model at server startup"""
     global predictor, predictor_initialized, initialization_error
     
     try:
@@ -57,7 +57,7 @@ def initialize_predictor():
             raise Exception("Failed to load historical data")
         
         predictor.calculate_empirical_distribution()
-        predictor.fit_bayesian_model()
+        predictor.fit_model()
         
         predictor_initialized = True
         print("Model initialized successfully")
@@ -218,6 +218,40 @@ def serve_interface():
     except FileNotFoundError:
         return "CFBInterface.html not found. Make sure it's in the same directory as this script.", 404
 
+@app.route('/api/calculate-parlay', methods=['POST'])
+def calculate_parlay():
+    """Calculate SGP probability and fair odds"""
+    if not predictor_initialized:
+        return jsonify({'error': 'Model not initialized'}), 500
+    
+    try:
+        data = request.get_json()
+        spread = float(data.get('spread'))
+        total = float(data.get('total'))
+        selections = data.get('selections', [])
+        
+        if not selections:
+            return jsonify({'error': 'No selections provided'}), 400
+        
+        # Get full probability distribution
+        all_probs = predictor.predict_score_probabilities(spread, total)
+        
+        # Calculate parlay probability
+        parlay_prob = predictor.calculate_parlay_probability(all_probs, selections)
+        
+        # Calculate fair odds
+        fair_odds = predictor.calculate_parlay_payout(parlay_prob)
+        
+        return jsonify({
+            'probability': float(parlay_prob),
+            'fair_odds': int(fair_odds),
+            'decimal_odds': float(1 / parlay_prob) if parlay_prob > 0 else 0,
+            'selections_count': len(selections)
+        })
+        
+    except Exception as e:
+        logger.error(f"Parlay calculation error: {e}")
+        return jsonify({'error': str(e)}), 500
 @app.errorhandler(404)
 def not_found(error):
     """Handle 404 errors"""

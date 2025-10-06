@@ -83,7 +83,7 @@ class CFBQuarterScorePredictor:
             count = int(prob * total_games)
             print(f"{score:<10} {count:<8} {prob:<12.6f} {prob*100:.2f}%")
     
-    def fit_bayesian_model(self):
+    def fit_model(self):
         if self.historical_data is None or not self.empirical_distribution:
             return
             
@@ -91,7 +91,7 @@ class CFBQuarterScorePredictor:
         common_scores = {k: v for k, v in self.empirical_distribution.items() 
                         if v >= min_occurrences / len(self.historical_data)}
         
-        print(f"\nFitting Bayesian models for {len(common_scores)} common score combinations")
+        print(f"\nFitting models for {len(common_scores)} common score combinations")
         print(f"Minimum occurrences threshold: {min_occurrences}")
         
         features = []
@@ -327,9 +327,8 @@ class CFBQuarterScorePredictor:
                 break
         
         median_spread = best_line
-        
         spread_lines = {}
-        for offset in [-1.0, 0.0, 1.0]:
+        for offset in [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]:
             line = median_spread + offset
             if line not in tested_lines:
                 tested_lines[line] = calculate_spread_prob(line)
@@ -339,6 +338,7 @@ class CFBQuarterScorePredictor:
                 'home_odds': prob_to_american_odds(tested_lines[line]),
                 'away_odds': prob_to_american_odds(1 - tested_lines[line])
             }
+
         
         def calculate_total_prob(line):
             over_prob = 0.0
@@ -391,10 +391,12 @@ class CFBQuarterScorePredictor:
             else:
                 break
         
-        median_total = best_total_line
         
+        
+        median_total = best_total_line
+
         total_lines = {}
-        for offset in [-1.0, 0.0, 1.0]:
+        for offset in [-2.0, -1.0, 0.0, 1.0, 2.0]:
             line = median_total + offset
             if line > 0:
                 if line not in tested_total_lines:
@@ -500,7 +502,106 @@ class CFBQuarterScorePredictor:
         print(f"\nSpecial Markets:")
         print(f"  Draw and Over 10.5: {markets['draw_and_over_10_5']:.4f} ({markets['draw_and_over_10_5']*100:.2f}%)")
         print(f"  Draw and Over 12.5: {markets['draw_and_over_12_5']:.4f} ({markets['draw_and_over_12_5']*100:.2f}%)")
+    def calculate_parlay_probability(self, all_probs, selections):
+        """
+        Calculate probability of a parlay using the full score distribution.
+        
+        selections is a list of dicts like:
+        [
+            {'type': 'spread', 'team': 'home', 'line': -3.5},
+            {'type': 'total', 'side': 'over', 'line': 9.5},
+            {'type': 'moneyline', 'team': 'away'}
+        ]
+        """
+        parlay_prob = 0.0
+        
+        for score_combo, prob in all_probs.items():
+            try:
+                home_score, away_score = map(int, score_combo.split('-'))
+                
+                # Check if this score satisfies ALL selections
+                all_conditions_met = True
+                
+                for selection in selections:
+                    #
+                    if selection['type'] == 'spread':
+                        margin = home_score - away_score
+                        line = selection['line']
+                        
+                        if selection['team'] == 'home':
+                            # Home covers if margin beats the spread
+                            # If line is -2.5 (home favored), margin must be > 2.5
+                            # If line is +2.5 (home underdog), margin must be > -2.5
+                            if margin <= -line:
+                                all_conditions_met = False
+                                break
+                        else:  # away
+                            # Away covers if they beat the spread from their perspective
+                            # If line is -2.5 (home favored, away gets +2.5), away margin must be < -2.5
+                            # If line is +2.5 (away favored), away margin must be < 2.5
+                            if margin >= -line:
+                                all_conditions_met = False
+                                break
+                    
+                    elif selection['type'] == 'total':
+                        total = home_score + away_score
+                        if selection['side'] == 'over':
+                            if total <= selection['line']:
+                                all_conditions_met = False
+                                break
+                        else:  # under
+                            if total >= selection['line']:
+                                all_conditions_met = False
+                                break
+                    
+                    elif selection['type'] == 'moneyline':
+                        if selection['team'] == 'home':
+                            if home_score <= away_score:
+                                all_conditions_met = False
+                                break
+                        else:  # away
+                            if away_score <= home_score:
+                                all_conditions_met = False
+                                break
+                    elif selection['type'] == 'moneyline_3way':
+                        if selection['team'] == 'home':
+                            if home_score <= away_score:
+                                all_conditions_met = False
+                                break
+                        elif selection['team'] == 'away':
+                            if away_score <= home_score:
+                                all_conditions_met = False
+                                break
+                        elif selection['team'] == 'draw':
+                            if home_score != away_score:
+                                all_conditions_met = False
+                                break
+                
+                if all_conditions_met:
+                    parlay_prob += prob
+                    
+            except:
+                continue
+        
+        return parlay_prob
 
+    def prob_to_american_odds(self, prob):
+        """Convert probability to American odds"""
+        if prob <= 0 or prob >= 1:
+            return 0
+        if prob >= 0.5:
+            return int(-100 * prob / (1 - prob))
+        else:
+            return int(100 * (1 - prob) / prob)
+
+    def calculate_parlay_payout(self, prob):
+        """Calculate parlay payout from true probability"""
+        if prob <= 0 or prob >= 1:
+            return 0
+        # Convert to decimal odds
+        decimal_odds = 1 / prob
+        # Return American odds
+        return self.prob_to_american_odds(prob)
 # Load environment variables from .env file
 load_dotenv()
 
@@ -527,8 +628,8 @@ def main():
     print("\nCalculating empirical distribution...")
     predictor.calculate_empirical_distribution()
     
-    print("\nFitting Bayesian model...")
-    predictor.fit_bayesian_model()
+    print("\nFitting model...")
+    predictor.fit_model()
     
     print("\n" + "="*80)
     print("MODEL READY")
