@@ -4,31 +4,36 @@ import mysql.connector
 import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
+from scipy.interpolate import UnivariateSpline
 import warnings
 warnings.filterwarnings('ignore')
 
 class CFBQuarterScorePredictor:
     """
-    Main class for predicting college football first quarter scores.
-    Uses historical game data to build probabilistic models that can predict
-    the likelihood of different score combinations based on pregame betting lines.
+    Predicts Q1 score probabilities using coefficient inheritance.
+    
+    Key improvements:
+    - Anchor models for common scores (n >= 100)
+    - Coefficient inheritance for rare scores from nearest anchor
+    - Strong regularization toward anchor coefficients
+    - No hardcoded buckets - every score gets individual treatment
     """
     
     def __init__(self, db_config):
-        """
-        Initialize the predictor with database configuration.
-        Sets up empty containers for storing empirical distributions, model parameters, and historical data.
-        """
+        """Initialize with database config and empty containers for data and models."""
         self.db_config = db_config
-        self.empirical_distribution = {}  # Will store baseline probability of each score combo
-        self.model_params = {}  # Will store logistic regression coefficients for each score
-        self.historical_data = None  # Will store all historical games data
+        self.empirical_distribution = {}
+        self.standardized_empirical_dist = {}
+        self.model_params = {}
+        self.anchor_scores = []
+        self.inheritance_log = []
+        self.historical_data = None
+        self.Q1_PERCENTAGE_POINTS = None
+        self.Q1_PERCENTAGE_SPREAD = None
+        self.q1_spread_interpolator = None
         
     def connect_to_database(self):
-        """
-        Establish connection to MySQL database using the provided configuration.
-        Returns connection object if successful, None if there is an error.
-        """
+        """Connect to MySQL database."""
         try:
             connection = mysql.connector.connect(**self.db_config)
             return connection
@@ -37,26 +42,21 @@ class CFBQuarterScorePredictor:
             return None
     
     def load_historical_data(self):
-        """
-        Load historical first quarter scoring data from the database.
-        Joins the games table with quarter_scoring table to get Q1 scores alongside pregame betting lines.
-        Only includes games with valid pregame spread and total data.
-        Creates a 'score_combination' field like '7-3' for easy grouping.
-        """
+        """Load Q1 scores from database and standardize to favored-underdog orientation."""
         connection = self.connect_to_database()
         if not connection:
             return False
             
         try:
-            # Query pulls game_id, pregame betting lines, and Q1 scores for both teams
-            # Filters for reasonable spread and total values to exclude outliers
             query = """
             SELECT 
                 g.game_id,
                 g.pregame_spread,
                 g.pregame_total,
                 q1_home.home_score as q1_home_score,
-                q1_home.away_score as q1_away_score
+                q1_home.away_score as q1_away_score,
+                g.home_points,
+                g.away_points
             FROM cfb.games g
             JOIN cfb.quarter_scoring q1_home ON g.game_id = q1_home.game_id 
             WHERE q1_home.quarter = 1
@@ -65,21 +65,89 @@ class CFBQuarterScorePredictor:
             AND g.pregame_spread BETWEEN -70 AND 70
             AND g.pregame_total BETWEEN 20 AND 90
             AND (g.home_classification = 'fbs' OR g.away_classification = 'fbs')
+            AND g.home_points IS NOT NULL
+            AND g.away_points IS NOT NULL
             ORDER BY g.game_id
             """
             
-            # Load query results into pandas DataFrame
-            self.historical_data = pd.read_sql(query, connection)
+            df = pd.read_sql(query, connection)
+            print(f"Loaded {len(df)} historical games")
             
-            # Create combined score string for easier grouping and probability calculation
-            # Example: home=7, away=3 becomes '7-3'
-            self.historical_data['score_combination'] = (
-                self.historical_data['q1_home_score'].astype(str) + '-' + 
-                self.historical_data['q1_away_score'].astype(str)
+            # Calculate Q1 statistics
+            df['q1_total'] = df['q1_home_score'] + df['q1_away_score']
+            df['game_total'] = df['home_points'] + df['away_points']
+            df['q1_margin'] = df['q1_home_score'] - df['q1_away_score']
+            df['game_margin'] = df['home_points'] - df['away_points']
+            df['abs_q1_margin'] = df['q1_margin'].abs()
+            df['abs_game_margin'] = df['game_margin'].abs()
+            df['abs_spread'] = df['pregame_spread'].abs()
+            
+            # Calculate Q1 percentage of game points
+            df['q1_points_pct'] = df['q1_total'] / df['game_total'].replace(0, np.nan)
+            q1_pct_points = df['q1_points_pct'].mean()
+            
+            # Calculate Q1 percentage of game spread (non-tie games only)
+            non_tie_games = df[df['abs_game_margin'] > 0].copy()
+            non_tie_games['q1_spread_pct'] = non_tie_games['abs_q1_margin'] / non_tie_games['abs_game_margin']
+            q1_pct_spread = non_tie_games['q1_spread_pct'].mean()
+            
+            # Create smooth interpolator for Q1 spread percentage
+            spread_sorted = non_tie_games.sort_values('abs_spread')
+            window_size = max(100, len(spread_sorted) // 50)
+            spread_sorted['q1_spread_pct_smooth'] = spread_sorted['q1_spread_pct'].rolling(
+                window=window_size, center=True, min_periods=50).mean()
+            
+            smooth_data = spread_sorted[['abs_spread', 'q1_spread_pct_smooth']].dropna()
+            interpolation_points = [0, 3, 7, 10, 14, 17, 21, 28, 35, 50]
+            interpolation_values = []
+            
+            for point in interpolation_points:
+                nearby = smooth_data[
+                    (smooth_data['abs_spread'] >= point - 2) & 
+                    (smooth_data['abs_spread'] <= point + 2)
+                ]
+                if len(nearby) > 0:
+                    interpolation_values.append(nearby['q1_spread_pct_smooth'].mean())
+                else:
+                    interpolation_values.append(q1_pct_spread)
+            
+            self.q1_spread_interpolator = UnivariateSpline(
+                interpolation_points, interpolation_values, s=0.0005, k=3)
+            
+            self.Q1_PERCENTAGE_POINTS = q1_pct_points
+            self.Q1_PERCENTAGE_SPREAD = q1_pct_spread
+            
+            print(f"\nEmpirical Q1 Statistics:")
+            print(f"  Q1 points as % of game total: {q1_pct_points*100:.2f}%")
+            print(f"  Q1 spread as % of game margin: {q1_pct_spread*100:.2f}% (overall)")
+            print(f"  Mean Q1 total: {df['q1_total'].mean():.2f} points")
+            print(f"  Mean game total: {df['game_total'].mean():.2f} points")
+            
+            # Standardize scores to favored-underdog orientation
+            df['raw_score_combination'] = (
+                df['q1_home_score'].astype(str) + '-' + 
+                df['q1_away_score'].astype(str)
             )
             
-            print(f"Loaded {len(self.historical_data)} historical games")
+            df['favored_score'] = np.where(
+                df['pregame_spread'] < 0,
+                df['q1_home_score'],
+                df['q1_away_score']
+            )
             
+            df['underdog_score'] = np.where(
+                df['pregame_spread'] < 0,
+                df['q1_away_score'],
+                df['q1_home_score']
+            )
+            
+            df['score_combination'] = (
+                df['favored_score'].astype(str) + '-' + 
+                df['underdog_score'].astype(str)
+            )
+            
+            self.historical_data = df
+            print("Games standardized to favored-underdog orientation for modeling")
             return True
             
         except Exception as e:
@@ -89,965 +157,699 @@ class CFBQuarterScorePredictor:
             connection.close()
     
     def calculate_empirical_distribution(self):
-        """
-        Calculate baseline probability distribution of all score combinations.
-        This represents the unconditional probability of each score without considering betting lines.
-        Essentially answers: "What percentage of all Q1s end 7-7, 7-3, etc?"
-        """
+        """Calculate baseline probabilities for both home-away and standardized formats."""
         if self.historical_data is None:
             return
             
-        # Count how many times each score combination occurred
-        score_counts = self.historical_data['score_combination'].value_counts()
         total_games = len(self.historical_data)
         
-        # Convert counts to probabilities by dividing by total games
+        # Home-away format
+        score_counts = self.historical_data['raw_score_combination'].value_counts()
         self.empirical_distribution = {}
         for score_combo, count in score_counts.items():
             self.empirical_distribution[score_combo] = count / total_games
         
-        # Display the most common scores for verification
-        print(f"\nEmpirical Distribution - Top 20 Scores:")
+        # Favored-underdog format
+        standardized_counts = self.historical_data['score_combination'].value_counts()
+        self.standardized_empirical_dist = {}
+        for score_combo, count in standardized_counts.items():
+            self.standardized_empirical_dist[score_combo] = count / total_games
+        
+        print(f"\nEmpirical Distribution - Top 40 Scores (Favored-Underdog format):")
         print(f"{'Score':<10} {'Count':<8} {'Probability':<12} {'Percentage'}")
         print("-" * 60)
-        sorted_dist = sorted(self.empirical_distribution.items(), key=lambda x: x[1], reverse=True)
-        for i, (score, prob) in enumerate(sorted_dist[:20]):
-            count = int(prob * total_games)
+        sorted_std = sorted(standardized_counts.items(), key=lambda x: x[1], reverse=True)
+        for i, (score, count) in enumerate(sorted_std[:40]):
+            prob = count / total_games
             print(f"{score:<10} {count:<8} {prob:<12.6f} {prob*100:.2f}%")
-    def load_calibration_data(self, calibration_folder):
-        """
-        Load market calibration data from CSV files in the specified folder.
-        Each file should be named <spread>_<total>.csv with columns: Home Score, Away Score, Fair
-        
-        This data represents the market's probability distribution for specific spread/total combinations,
-        which we'll use to calibrate our model's predictions.
-        
-        Args:
-            calibration_folder: path to folder containing calibration CSV files
-        """
-        import glob
-        import re
-        
-        self.calibration_data = {}
-        
-        # Find all CSV files in the calibration folder
-        csv_files = glob.glob(os.path.join(calibration_folder, '*.csv'))
-        
-        if not csv_files:
-            print(f"Warning: No calibration files found in {calibration_folder}")
-            return False
-        
-        print(f"\nLoading calibration data from {len(csv_files)} files...")
-        
-        for csv_file in csv_files:
-            try:
-                # Extract spread and total from filename
-                # Handle both formats: "3_49.csv" and "7.5 45.5.csv"
-                filename = os.path.basename(csv_file)
-                # Remove .csv extension
-                filename_no_ext = filename.replace('.csv', '')
-                # Replace spaces with underscores for consistent parsing
-                filename_no_ext = filename_no_ext.replace(' ', '_')
-                # Split on underscore
-                parts = filename_no_ext.split('_')
-                
-                if len(parts) != 2:
-                    print(f"Skipping {filename}: invalid filename format")
-                    continue
-                
-                spread = float(parts[0])
-                total = float(parts[1])
-                
-                # Load the calibration data
-                cal_df = pd.read_csv(csv_file)
-                
-                # Verify required columns exist
-                required_cols = ['Home Score', 'Away Score', 'Fair']
-                if not all(col in cal_df.columns for col in required_cols):
-                    print(f"Skipping {filename}: missing required columns")
-                    continue
-                
-                # Store calibration probabilities as a dictionary keyed by score combination
-                cal_probs = {}
-                for _, row in cal_df.iterrows():
-                    home_score = int(row['Home Score'])
-                    away_score = int(row['Away Score'])
-                    fair_prob = float(row['Fair'])
-                    
-                    score_combo = f"{home_score}-{away_score}"
-                    cal_probs[score_combo] = fair_prob
-                
-                # Store this calibration data indexed by (spread, total)
-                self.calibration_data[(spread, total)] = cal_probs
-                
-                print(f"  Loaded: Spread {spread:+.1f}, Total {total:.1f} ({len(cal_probs)} scores)")
-                
-            except Exception as e:
-                print(f"Error loading {csv_file}: {e}")
-                continue
-        
-        print(f"Successfully loaded {len(self.calibration_data)} calibration datasets")
-        return len(self.calibration_data) > 0
 
-    def interpolate_calibration(self, spread, total, score_combo):
-        """
-        Interpolate/extrapolate calibration factor for a specific spread, total, and score combination.
+    def get_score_pattern(self, score_str):
+        """Categorize score into pattern for finding similar scores."""
+        fav_score, dog_score = map(int, score_str.split('-'))
+        margin = fav_score - dog_score
+        score_total = fav_score + dog_score
         
-        Uses inverse distance weighting (IDW) to combine calibration data from multiple nearby
-        spread/total combinations. Scores closer in (spread, total) space have more influence.
-        
-        Args:
-            spread: target spread value
-            total: target total value
-            score_combo: score combination string like "7-3"
-            
-        Returns:
-            Interpolated calibration probability, or None if score not in any calibration data
-        """
-        if not hasattr(self, 'calibration_data') or not self.calibration_data:
-            return None
-        
-        # Collect all calibration points that contain this score combination
-        calibration_points = []
-        for (cal_spread, cal_total), cal_probs in self.calibration_data.items():
-            if score_combo in cal_probs:
-                # Calculate distance in normalized (spread, total) space
-                # Normalize spread by 10 and total by 20 to weight them appropriately
-                spread_dist = (spread - cal_spread) / 10.0
-                total_dist = (total - cal_total) / 20.0
-                distance = np.sqrt(spread_dist**2 + total_dist**2)
-                
-                calibration_points.append({
-                    'spread': cal_spread,
-                    'total': cal_total,
-                    'prob': cal_probs[score_combo],
-                    'distance': distance
-                })
-        
-        # If no calibration data contains this score, return None
-        if not calibration_points:
-            return None
-        
-        # If we have an exact match (distance = 0), return that probability
-        exact_matches = [p for p in calibration_points if p['distance'] < 1e-6]
-        if exact_matches:
-            return exact_matches[0]['prob']
-        
-        # Use inverse distance weighting (IDW) for interpolation
-        # Weight = 1 / distance^power, where power controls how quickly influence drops off
-        power = 2.0
-        
-        total_weight = 0.0
-        weighted_prob = 0.0
-        
-        for point in calibration_points:
-            # Add small epsilon to prevent division by zero
-            weight = 1.0 / (point['distance']**power + 1e-10)
-            weighted_prob += weight * point['prob']
-            total_weight += weight
-        
-        # Return weighted average
-        if total_weight > 0:
-            return weighted_prob / total_weight
+        # Define pattern categories
+        if fav_score == dog_score:
+            return 'tie', score_total
+        elif dog_score == 0:
+            return 'fav_shutout', score_total
+        elif fav_score == 0:
+            return 'dog_shutout', score_total
+        elif margin >= 14:
+            return 'fav_blowout', score_total
+        elif margin >= 7:
+            return 'fav_win_multi', score_total
+        elif margin > 0:
+            return 'fav_win_close', score_total
+        elif margin <= -14:
+            return 'dog_blowout', score_total
+        elif margin <= -7:
+            return 'dog_win_multi', score_total
         else:
-            return None
+            return 'dog_win_close', score_total
+    
+    def find_nearest_anchor(self, target_score, anchor_scores):
+        """Find nearest anchor score by pattern and total points."""
+        target_pattern, target_total = self.get_score_pattern(target_score)
+        
+        # Find anchors with same pattern
+        same_pattern_anchors = []
+        for anchor in anchor_scores:
+            anchor_pattern, anchor_total = self.get_score_pattern(anchor)
+            if anchor_pattern == target_pattern:
+                same_pattern_anchors.append((anchor, anchor_total))
+        
+        # If we have same-pattern anchors, find closest by total
+        if same_pattern_anchors:
+            same_pattern_anchors.sort(key=lambda x: abs(x[1] - target_total))
+            return same_pattern_anchors[0][0]
+        
+        # If no same-pattern anchor, find closest by total regardless of pattern
+        # but prefer similar score characteristics
+        all_anchors_with_totals = []
+        for anchor in anchor_scores:
+            anchor_pattern, anchor_total = self.get_score_pattern(anchor)
+            all_anchors_with_totals.append((anchor, anchor_total))
+        
+        all_anchors_with_totals.sort(key=lambda x: abs(x[1] - target_total))
+        return all_anchors_with_totals[0][0]
 
-    def apply_calibration(self, model_probs, spread, total):
+    def get_coefficient_bounds(self, score_str, n_occurrences):
         """
-        Apply market calibration to model predictions using Bayesian updating.
-        
-        For each score, we:
-        1. Get model's predicted probability
-        2. Get interpolated market probability from calibration data
-        3. Blend them using a weighted average (more weight to market for well-calibrated scores)
-        4. Normalize to ensure probabilities sum to 1
-        
-        The calibration strength is adaptive:
-        - Stronger calibration for scores with nearby market data
-        - Weaker calibration for scores far from any market data
-        
-        Args:
-            model_probs: dictionary of model-predicted probabilities
-            spread: game spread
-            total: game total
-            
-        Returns:
-            Calibrated probability distribution
+        Get bounds for total and margin coefficients based on score characteristics.
+        Uses flexible bounds that allow model to learn from data.
         """
-        if not hasattr(self, 'calibration_data') or not self.calibration_data:
-            # No calibration data available, return model predictions as-is
-            return model_probs
+        fav_score, dog_score = map(int, score_str.split('-'))
+        margin = fav_score - dog_score
+        score_total = fav_score + dog_score
         
-        calibrated_probs = {}
+        # For common scores (n >= 100), use wide bounds
+        # For rare scores, use tighter bounds to stay close to anchor
+        bound_width = 3 if n_occurrences >= 100 else 1.5
         
-        # Determine how much to trust calibration vs model
-        # We'll calculate this adaptively based on proximity to calibration data
-        for score_combo, model_prob in model_probs.items():
-            # Get interpolated market probability for this score
-            market_prob = self.interpolate_calibration(spread, total, score_combo)
-            
-            if market_prob is not None:
-                # We have market data for this score, blend model and market
-                # Calculate distance to nearest calibration point for this score
-                min_distance = float('inf')
-                for (cal_spread, cal_total), cal_probs in self.calibration_data.items():
-                    if score_combo in cal_probs:
-                        spread_dist = (spread - cal_spread) / 10.0
-                        total_dist = (total - cal_total) / 20.0
-                        distance = np.sqrt(spread_dist**2 + total_dist**2)
-                        min_distance = min(min_distance, distance)
-                
-                # Calibration weight decreases with distance
-                # At distance=0 (exact match), weight=0.7 (70% market, 30% model)
-                # At distance=2, weight=0.35 (35% market, 65% model)
-                # At distance=5+, weight approaches 0 (mostly model)
-                max_calibration_weight = 0.7
-                distance_decay = np.exp(-min_distance / 2.0)
-                calibration_weight = max_calibration_weight * distance_decay
-                
-                # Blend model and market probabilities
-                blended_prob = (calibration_weight * market_prob + 
-                            (1 - calibration_weight) * model_prob)
-                calibrated_probs[score_combo] = blended_prob
+        if fav_score == dog_score:
+            # Ties: total coef depends on scoring level
+            if score_total == 0:
+                # 0-0 decreases with total
+                total_bounds = (-bound_width, 0)
+            elif score_total <= 14:
+                # Low-mid ties: flexible
+                total_bounds = (-bound_width, bound_width)
             else:
-                # No market data for this score, use model prediction
-                calibrated_probs[score_combo] = model_prob
-        
-        # Normalize to ensure probabilities sum to 1
-        total_prob = sum(calibrated_probs.values())
-        if total_prob > 0:
-            calibrated_probs = {k: v / total_prob for k, v in calibrated_probs.items()}
-        
-        return calibrated_probs
-    def fit_model(self):
-        """
-        Fit logistic regression models for each common score combination.
-        For each score, we model P(score | spread, total) using a logistic function.
-        This allows us to adjust probabilities based on game-specific betting lines.
-        
-        Model features:
-        - Intercept: baseline log-odds for this score
-        - Spread: linear effect of point spread (Note: spread is from home team's perspective and is negative if home is favored, positive if away is favored
-                                                 Example: if spread is -7, home team is favored by 7 points)
-        - Total: linear effect of total points line
-        - Spread^2: captures non-linear spread effects
-        - Total^2: captures non-linear total effects
-        """
-        if self.historical_data is None or not self.empirical_distribution:
-            return
+                # High-scoring ties: increase with total
+                total_bounds = (0, bound_width)
+            margin_bounds = (-1, 1)  # Ties happen at any spread
             
-        # Only model scores that occur frequently enough for reliable estimation
-        # Minimum threshold scales with dataset size
-        min_occurrences = max(3, len(self.historical_data) // 1000)
-        common_scores = {k: v for k, v in self.empirical_distribution.items() 
-                        if v >= min_occurrences / len(self.historical_data)}
+        elif dog_score == 0:
+            # Favorite shutouts
+            if fav_score <= 10:
+                # Low-scoring shutouts: defensive games
+                total_bounds = (-bound_width, 1)
+            elif fav_score <= 17:
+                # Mid shutouts: flexible
+                total_bounds = (-bound_width, bound_width)
+            else:
+                # High shutouts: offensive blowouts
+                total_bounds = (0, bound_width)
+            margin_bounds = (0, bound_width)
+            
+        elif fav_score == 0:
+            # Underdog shutouts (mirror of favorite shutouts)
+            if dog_score <= 10:
+                total_bounds = (-bound_width, 1)
+            elif dog_score <= 17:
+                total_bounds = (-bound_width, bound_width)
+            else:
+                total_bounds = (0, bound_width)
+            margin_bounds = (-bound_width, 0)
+            
+        elif margin >= 14:
+            # Large margins: more common in high-scoring games
+            total_bounds = (0, bound_width)
+            margin_bounds = (0 if margin > 0 else -bound_width, bound_width if margin > 0 else 0)
+            
+        elif score_total >= 21:
+            # High-scoring games: increase with total
+            total_bounds = (0, bound_width)
+            margin_bounds = (-bound_width, bound_width)
+            
+        else:
+            # Default: flexible bounds
+            total_bounds = (-bound_width, bound_width)
+            margin_bounds = (-bound_width, bound_width)
         
-        print(f"\nFitting models for {len(common_scores)} common score combinations")
-        print(f"Minimum occurrences threshold: {min_occurrences}")
+        return total_bounds, margin_bounds
+
+    def fit_model(self):
+        """Fit models using coefficient inheritance from anchor scores."""
+        if self.historical_data is None:
+            return
         
-        # Build feature matrix for all games with common scores
-        features = []
-        score_labels = []
+        print(f"\n{'='*80}")
+        print(f"FITTING MODELS WITH COEFFICIENT INHERITANCE")
+        print(f"{'='*80}")
         
-        for _, row in self.historical_data.iterrows():
-            if row['score_combination'] in common_scores:
-                # Normalize spread and total to improve optimization
-                # Spread normalized by dividing by 10
-                norm_spread = row['pregame_spread'] / 10.0
-                # Total normalized by centering at 50 and dividing by 20
-                norm_total = (row['pregame_total'] - 50) / 20.0
+        # Get score counts
+        score_counts = self.historical_data['score_combination'].value_counts()
+        
+
+        # Scores below this will inherit from these reliable anchors
+        anchor_threshold = 75
+        self.anchor_scores = score_counts[score_counts >= anchor_threshold].index.tolist()
+        rare_scores = score_counts[score_counts < anchor_threshold].index.tolist()
+        
+        print(f"\nAnchor scores (>= {anchor_threshold} occurrences): {len(self.anchor_scores)}")
+        print(f"Rare scores (< {anchor_threshold} occurrences): {len(rare_scores)}")
+        
+        # Prepare feature matrix
+        abs_spread = self.historical_data['abs_spread']
+        total = self.historical_data['pregame_total']
+        
+        implied_fav_total = (total + abs_spread) / 2
+        implied_dog_total = (total - abs_spread) / 2
+        
+        typical_game_score = self.historical_data['game_total'].mean() / 2
+        norm_fav = implied_fav_total / typical_game_score
+        norm_dog = implied_dog_total / typical_game_score
+        
+        feature_total = norm_fav + norm_dog
+        feature_margin = norm_fav - norm_dog
+        
+        X = np.column_stack([
+            np.ones(len(self.historical_data)),
+            feature_total,
+            feature_margin
+        ])
+        
+        print(f"\nFeature matrix: {X.shape[0]} games × {X.shape[1]} features")
+        print(f"Features: [intercept, total, margin]")
+        
+        # PHASE 1: Fit anchor models
+        print(f"\n{'='*80}")
+        print(f"PHASE 1: Fitting Anchor Models")
+        print(f"{'='*80}")
+        
+        anchor_fits = 0
+        for score_combo in self.anchor_scores:
+            try:
+                fav_score, dog_score = map(int, score_combo.split('-'))
+                y = (self.historical_data['score_combination'] == score_combo).astype(int).values
+                n_occurrences = np.sum(y)
                 
-                # Feature vector: [1, spread, total, spread^2, total^2]
-                # The 1 is the intercept term
-                feature_vector = [
-                    1.0,
-                    norm_spread,
-                    norm_total,
-                    norm_spread**2,
-                    norm_total**2
+                # Prior probability
+                prior_prob = score_counts[score_combo] / len(self.historical_data)
+                prior_prob_clipped = np.clip(prior_prob, 1e-6, 1 - 1e-6)
+                prior_logit = np.log(prior_prob_clipped / (1 - prior_prob_clipped))
+                
+                # Get bounds
+                total_bounds, margin_bounds = self.get_coefficient_bounds(score_combo, n_occurrences)
+                
+                # Define loss function with regularization
+                def negative_log_likelihood(params):
+                    logits = X @ params
+                    logits_clipped = np.clip(logits, -50, 50)
+                    probs = 1 / (1 + np.exp(-logits_clipped))
+                    probs = np.clip(probs, 1e-10, 1 - 1e-10)
+                    
+                    log_likelihood = np.sum(y * np.log(probs) + (1 - y) * np.log(1 - probs))
+                    nll = -log_likelihood
+                    
+                    # Light regularization for anchor models
+                    alpha = 0.005 * (1 + 1/max(n_occurrences, 10))
+                    l1_ratio = 0.3
+                    
+                    prior_means = np.array([prior_logit, 0, 0])
+                    l1_penalty = alpha * l1_ratio * np.sum(np.abs(params - prior_means))
+                    l2_penalty = alpha * (1 - l1_ratio) * np.sum((params - prior_means)**2)
+                    
+                    total_loss = nll + l1_penalty + l2_penalty
+                    return total_loss if np.isfinite(total_loss) else 1e10
+                
+                # Initial parameters
+                initial_params = np.array([prior_logit, 0, 0]) + np.random.normal(0, 0.01, 3)
+                
+                # Parameter bounds
+                param_bounds = [
+                    (prior_logit - 5, prior_logit + 5),
+                    total_bounds,
+                    margin_bounds
                 ]
                 
-                features.append(feature_vector)
-                score_labels.append(row['score_combination'])
-        
-        # Convert to numpy arrays for efficient computation
-        self.X = np.array(features)
-        self.y = score_labels
-        self.score_list = list(common_scores.keys())
-        self.score_to_idx = {score: idx for idx, score in enumerate(self.score_list)}
-        
-        print(f"Feature matrix shape: {self.X.shape[0]} games x {self.X.shape[1]} features")
-        print(f"\nSample feature statistics:")
-        print(f"  Spread (normalized): mean={np.mean(self.X[:, 1]):.3f}, std={np.std(self.X[:, 1]):.3f}")
-        print(f"  Total (normalized): mean={np.mean(self.X[:, 2]):.3f}, std={np.std(self.X[:, 2]):.3f}")
-        
-        self.model_params = {}
-        successful_fits = 0
-        
-        print(f"\nFitting individual logistic regression models...")
-        
-        # Fit a separate binary logistic regression for each score combination
-        # This is a "one-vs-all" approach where each model predicts P(this_score | features)
-        # Note that score is in terms of home team but unlike spread it is positive if home team is winning. For example 7-0 means home is up by 7.
-        for i, score in enumerate(self.score_list):
-            # Create binary target: 1 if this score, 0 otherwise
-            y_binary = np.array([1 if label == score else 0 for label in self.y])
-            
-            # Calculate prior probability and convert to log-odds (logit) space
-            # This serves as a starting point and regularization anchor
-            prior_prob = self.empirical_distribution[score]
-            prior_prob_clipped = np.clip(prior_prob, 1e-6, 1 - 1e-6)
-            prior_logit = np.log(prior_prob_clipped / (1 - prior_prob_clipped))
-            
-            def objective(params):
-                """
-                Objective function for optimization: negative log-likelihood with L2 regularization.
-                We minimize this to find the best model parameters.
-                """
-                # Calculate predicted log-odds for each game
-                logits = self.X @ params
-                # Clip to prevent numerical overflow in exp()
-                logits_clipped = np.clip(logits, -50, 50)
-                # Convert log-odds to probabilities using sigmoid function
-                probs = 1 / (1 + np.exp(-logits_clipped))
-                # Clip probabilities away from 0 and 1 to prevent log(0)
-                probs = np.clip(probs, 1e-10, 1 - 1e-10)
+                # Optimize
+                result = minimize(negative_log_likelihood, initial_params, 
+                                method='L-BFGS-B', bounds=param_bounds)
                 
-                # Calculate log-likelihood: sum of log P(y|x) across all games
-                log_likelihood = np.sum(y_binary * np.log(probs) + (1 - y_binary) * np.log(1 - probs))
-                # Negative log-likelihood (we minimize this)
-                nll = -log_likelihood
-                
-                # L2 regularization: penalize parameters that drift far from prior
-                # This prevents overfitting, especially for rare scores
-                prior_means = np.array([prior_logit, 0, 0, 0, 0])
-                # Regularization strength increases for rarer scores
-                reg_strength = 0.1 * (1 + 1/max(prior_prob * len(self.historical_data), 5))
-                l2_penalty = reg_strength * np.sum((params - prior_means)**2)
-                
-                # Total loss to minimize
-                total_loss = nll + l2_penalty
-                return total_loss if np.isfinite(total_loss) else 1e10
-            
-            # Initialize parameters near prior with small random noise
-            init_params = np.array([prior_logit, 0, 0, 0, 0]) + np.random.normal(0, 0.01, 5)
-            
-            # Set bounds for optimization to keep parameters reasonable
-            # Intercept can vary within 5 units of prior logit
-            # Spread/Total linear effects bounded to [-2, 2]
-            # Quadratic effects bounded to [-1, 1]
-            param_bounds = [
-                (prior_logit - 5, prior_logit + 5),
-                (-2, 2),
-                (-2, 2),
-                (-1, 1),
-                (-1, 1)
-            ]
-            
-            optimization_success = False
-            
-            # Try L-BFGS-B optimization first (gradient-based, efficient)
+                if result.success:
+                    self.model_params[score_combo] = result.x
+                    anchor_fits += 1
+                    
+            except Exception as e:
+                print(f"Error fitting anchor {score_combo}: {e}")
+                continue
+        
+        print(f"Successfully fit {anchor_fits}/{len(self.anchor_scores)} anchor models")
+        
+        # PHASE 2: Fit rare score models with coefficient inheritance
+        print(f"\n{'='*80}")
+        print(f"PHASE 2: Fitting Rare Scores with Coefficient Inheritance")
+        print(f"{'='*80}")
+        
+        rare_fits = 0
+        inheritance_log = []
+        
+        for score_combo in rare_scores:
             try:
-                result = minimize(objective, init_params, method='L-BFGS-B', bounds=param_bounds)
-                if result.success and np.isfinite(result.fun):
-                    self.model_params[score] = result.x
-                    optimization_success = True
-                    successful_fits += 1
-            except:
-                pass
-            
-            # If L-BFGS-B fails, try Nelder-Mead (gradient-free, more robust)
-            if not optimization_success:
-                try:
-                    result = minimize(objective, init_params, method='Nelder-Mead')
-                    if result.success and np.isfinite(result.fun) and np.all(np.abs(result.x) < 10):
-                        self.model_params[score] = result.x
-                        optimization_success = True
-                        successful_fits += 1
-                except:
-                    pass
-            
-            # If both methods fail, raise error
-            if not optimization_success:
-                raise RuntimeError(f"Optimization failed for score {score}")
-        
-        print(f"Successfully fitted {successful_fits}/{len(self.score_list)} models")
-        
-        # Display sample coefficients to verify reasonable values
-        # Would assume that the more favored the home team is the more the home team scores and less the away team scores and vice versa when away team is favored. 
-        # Ex we should see more probability of 7-0, 14-0 as spread gets more negative
-        print(f"\nSample model coefficients (first 5 scores):")
-        print(f"{'Score':<10} {'Intercept':<10} {'Spread':<10} {'Total':<10} {'Spread^2':<10} {'Total^2':<10}")
-        print("-" * 70)
-        for score in list(self.model_params.keys())[:5]:
-            params = self.model_params[score]
-            print(f"{score:<10} {params[0]:<10.3f} {params[1]:<10.3f} {params[2]:<10.3f} {params[3]:<10.3f} {params[4]:<10.3f}")
-    
-    def predict_score_probabilities(self, spread, total):
-        """
-        Predict probability distribution over all possible scores given a spread and total.
-        Now includes calibration layer that adjusts predictions based on market data.
-        
-        Process:
-        1. For scores with fitted models: use logistic regression to adjust empirical probability
-        2. For rare scores without models: use heuristic adjustment based on distance from expected outcome
-        3. Apply market calibration using interpolated data from calibration files
-        4. Normalize all probabilities to sum to 1
-        
-        Args:
-            spread: pregame point spread (negative = home favored)
-            total: pregame total points line
-            
-        Returns:
-            Dictionary mapping score combinations to probabilities
-        """
-        if not self.model_params:
-            return {}
-        
-        # Normalize inputs the same way as during training
-        norm_spread = spread / 10.0
-        norm_total = (total - 50) / 20.0
-        x_new = np.array([1.0, norm_spread, norm_total, norm_spread**2, norm_total**2])
-        
-        updated_probs = {}
-        
-        # For common scores with fitted models: calculate adjusted probability
-        for score in self.score_list:
-            params = self.model_params[score]
-            # Calculate log-odds using model parameters
-            logit = x_new @ params
-            # Clip to prevent overflow
-            logit_clipped = np.clip(logit, -50, 50)
-            # Convert to probability using sigmoid
-            prob = 1 / (1 + np.exp(-logit_clipped))
-            updated_probs[score] = prob
-        
-        # For rare scores without models: use distance-based heuristic
-        # Scores closer to expected outcome get higher adjusted probability
-        for score, emp_prob in self.empirical_distribution.items():
-            if score not in updated_probs:
-                # Parse the score combination
-                home_score, away_score = map(int, score.split('-'))
-                actual_margin = home_score - away_score
-                actual_total = home_score + away_score
+                y = (self.historical_data['score_combination'] == score_combo).astype(int).values
+                n_occurrences = np.sum(y)
                 
-                # Expected margin: opposite of spread (spread is home's disadvantage)
-                # Expected Q1 total: 25% of game total
-                expected_margin = -spread
-                expected_q1_total = total * 0.25
+                # Skip if too few occurrences
+                if n_occurrences < 5:
+                    continue
                 
-                # Calculate how far this score is from expectations
-                margin_diff = abs(actual_margin - expected_margin)
-                total_diff = abs(actual_total - expected_q1_total)
+                # Find nearest anchor
+                nearest_anchor = self.find_nearest_anchor(score_combo, self.anchor_scores)
+                anchor_params = self.model_params[nearest_anchor]
                 
-                # Apply exponential decay: scores far from expectation get reduced probability
-                margin_factor = np.exp(-margin_diff / 10.0)
-                total_factor = np.exp(-total_diff / 5.0)
+                inheritance_log.append((score_combo, nearest_anchor, n_occurrences))
                 
-                # Adjust empirical probability based on distance factors
-                adjusted_prob = emp_prob * margin_factor * total_factor
-                updated_probs[score] = adjusted_prob
+                # Prior probability
+                prior_prob = score_counts[score_combo] / len(self.historical_data)
+                prior_prob_clipped = np.clip(prior_prob, 1e-6, 1 - 1e-6)
+                prior_logit = np.log(prior_prob_clipped / (1 - prior_prob_clipped))
+                
+                # Define loss with STRONG regularization toward anchor
+                def negative_log_likelihood_inherited(params):
+                    logits = X @ params
+                    logits_clipped = np.clip(logits, -50, 50)
+                    probs = 1 / (1 + np.exp(-logits_clipped))
+                    probs = np.clip(probs, 1e-10, 1 - 1e-10)
+                    
+                    log_likelihood = np.sum(y * np.log(probs) + (1 - y) * np.log(1 - probs))
+                    nll = -log_likelihood
+                    
+                    # STRONG regularization toward anchor coefficients
+                    # Intercept can vary (different base rates), but total/margin stay close
+                    alpha_intercept = 0.05
+                    alpha_coefs = 0.2 * (1 + 50/max(n_occurrences, 10))  # Stronger for rarer scores
+                    l1_ratio = 0.3
+                    
+                    # Regularize intercept toward prior_logit
+                    intercept_l1 = alpha_intercept * l1_ratio * abs(params[0] - prior_logit)
+                    intercept_l2 = alpha_intercept * (1 - l1_ratio) * (params[0] - prior_logit)**2
+                    
+                    # Regularize total and margin coefficients toward anchor
+                    coef_l1 = alpha_coefs * l1_ratio * (abs(params[1] - anchor_params[1]) + abs(params[2] - anchor_params[2]))
+                    coef_l2 = alpha_coefs * (1 - l1_ratio) * ((params[1] - anchor_params[1])**2 + (params[2] - anchor_params[2])**2)
+                    
+                    total_loss = nll + intercept_l1 + intercept_l2 + coef_l1 + coef_l2
+                    return total_loss if np.isfinite(total_loss) else 1e10
+                
+                # Initialize from anchor parameters but adjust intercept
+                initial_params = anchor_params.copy()
+                initial_params[0] = prior_logit  # Use score's own base rate
+                
+                # Bounds centered ONLY on anchor coefficients
+                # This is the fix: no conflicting logic from get_coefficient_bounds
+                anchor_total_coef = anchor_params[1]
+                anchor_margin_coef = anchor_params[2]
+                
+                # Allow ±0.5 movement from anchor for rare scores
+                total_bounds_tight = (anchor_total_coef - 0.5, anchor_total_coef + 0.5)
+                margin_bounds_tight = (anchor_margin_coef - 0.5, anchor_margin_coef + 0.5)
+                
+                param_bounds = [
+                    (prior_logit - 5, prior_logit + 5),  # Intercept is free
+                    total_bounds_tight,                   # Total anchored
+                    margin_bounds_tight                   # Margin anchored
+                ]
+                
+                # Optimize
+                result = minimize(negative_log_likelihood_inherited, initial_params,
+                                method='L-BFGS-B', bounds=param_bounds)
+                
+                if result.success:
+                    self.model_params[score_combo] = result.x
+                    rare_fits += 1
+                    
+            except Exception as e:
+                print(f"Error fitting rare score {score_combo}: {e}")
+                continue
         
-        # Normalize before calibration
-        total_prob = sum(updated_probs.values())
-        if total_prob > 0:
-            updated_probs = {score: prob / total_prob for score, prob in updated_probs.items()}
+        print(f"Successfully fit {rare_fits}/{len(rare_scores)} rare score models")
         
-        # Apply market calibration if available
-        calibrated_probs = self.apply_calibration(updated_probs, spread, total)
+        # Show some inheritance examples
+        print(f"\nCoefficient Inheritance Examples:")
+        print(f"{'Rare Score':<12} {'Anchor':<12} {'Occurrences':<12} {'Rare Total Coef':<18} {'Anchor Total Coef'}")
+        print("-" * 80)
+        for rare, anchor, n_occ in inheritance_log[:10]:
+            if rare in self.model_params and anchor in self.model_params:
+                rare_coef = self.model_params[rare][1]
+                anchor_coef = self.model_params[anchor][1]
+                print(f"{rare:<12} {anchor:<12} {n_occ:<12} {rare_coef:>+.4f} ({rare_coef:+.2f})  {anchor_coef:>+.4f} ({anchor_coef:+.2f})")
         
-        return calibrated_probs
-    
-    def calculate_betting_markets(self, all_probs, spread, total):
-        """
-        Derive various betting market probabilities and odds from the score distribution.
+        # Store inheritance log for debugging
+        self.inheritance_log = inheritance_log
         
-        Calculates:
-        - Moneyline (2-way and 3-way)
-        - Spread lines at multiple points
-        - Total lines at multiple points
-        - Special draw markets
+        print(f"{'='*80}\n")
+
+    def predict(self, pregame_spread, total, debug=False):
+        """Generate probability distribution for Q1 scores."""
+        home_favored = (pregame_spread < 0)
+        abs_spread = abs(pregame_spread)
         
-        Args:
-            all_probs: complete probability distribution over scores
-            spread: game spread (used to initialize spread line search)
-            total: game total (used to initialize total line search)
+        debug_lines = []
+        
+        if debug:
+            debug_lines.append("="*80)
+            debug_lines.append("DETAILED DEBUG OUTPUT")
+            debug_lines.append("="*80)
+            debug_lines.append(f"Pregame spread: {pregame_spread:+.1f}")
+            debug_lines.append(f"Favorite: {'Home' if home_favored else 'Away'}")
+            debug_lines.append(f"Spread magnitude: {abs_spread:.1f}")
+            debug_lines.append(f"Total: {total:.1f}")
+            debug_lines.append("="*80)
+            debug_lines.append("")
+        
+        print(f"\n{'='*80}")
+        print(f"PREDICTION FOR QUARTER 1")
+        print(f"{'='*80}")
+        print(f"Spread: {pregame_spread:+.1f} ({'Home' if home_favored else 'Away'} favored by {abs_spread:.1f})")
+        print(f"Total: {total:.1f}")
+        print(f"{'='*80}\n")
+        
+        predictions = {}
+        debug_info = {}
+        
+        # Calculate features
+        implied_fav_total = (total + abs_spread) / 2
+        implied_dog_total = (total - abs_spread) / 2
+        
+        typical_game_score = self.historical_data['game_total'].mean() / 2
+        norm_fav = implied_fav_total / typical_game_score
+        norm_dog = implied_dog_total / typical_game_score
+        
+        feature_total = norm_fav + norm_dog
+        feature_margin = norm_fav - norm_dog
+        
+        features_full = np.array([1.0, feature_total, feature_margin])
+        
+        print(f"Game-level implied totals:")
+        print(f"  Favorite: {implied_fav_total:.2f} points (full game)")
+        print(f"  Underdog: {implied_dog_total:.2f} points (full game)")
+        print(f"  Model learned Q1 is ~{self.Q1_PERCENTAGE_POINTS*100:.1f}% of these")
+        print(f"\nOrthogonal features:")
+        print(f"  feature_total  = {feature_total:.4f}")
+        print(f"  feature_margin = {feature_margin:.4f}\n")
+        
+        if debug:
+            expected_q1_fav = implied_fav_total * self.Q1_PERCENTAGE_POINTS
+            expected_q1_dog = implied_dog_total * self.Q1_PERCENTAGE_POINTS
+            expected_q1_total = expected_q1_fav + expected_q1_dog
             
-        Returns:
-            Dictionary with all betting markets and their probabilities/odds
-        """
-        # Calculate moneyline probabilities by summing over relevant scores
-        home_win_prob = 0.0
-        away_win_prob = 0.0
-        tie_prob = 0.0
+            debug_lines.append(f"GAME-LEVEL IMPLIED TOTALS:")
+            debug_lines.append(f"  Favorite: {implied_fav_total:.2f} points (full game)")
+            debug_lines.append(f"  Underdog: {implied_dog_total:.2f} points (full game)")
+            debug_lines.append(f"  Expected Q1: Fav {expected_q1_fav:.2f}, Dog {expected_q1_dog:.2f}")
+            debug_lines.append(f"  Total expected Q1: {expected_q1_total:.2f} points")
+            debug_lines.append("")
+            debug_lines.append("ORTHOGONAL FEATURES:")
+            debug_lines.append(f"  feature_total  = {feature_total:.4f}")
+            debug_lines.append(f"  feature_margin = {feature_margin:.4f}")
+            debug_lines.append("")
         
-        for score_combo, prob in all_probs.items():
+        # Generate predictions for all scores
+        all_scores = list(self.empirical_distribution.keys())
+        
+        for home_away_score in all_scores:
             try:
-                home_score, away_score = map(int, score_combo.split('-'))
-                if home_score > away_score:
-                    home_win_prob += prob
-                elif away_score > home_score:
-                    away_win_prob += prob
+                home_score, away_score = map(int, home_away_score.split('-'))
+                base_prob = self.empirical_distribution[home_away_score]
+                
+                # Convert to favored-underdog orientation
+                if home_favored:
+                    favored_score = home_score
+                    underdog_score = away_score
                 else:
-                    tie_prob += prob
-            except:
+                    favored_score = away_score
+                    underdog_score = home_score
+                
+                standardized_score = f"{favored_score}-{underdog_score}"
+                
+                # Use model if available, otherwise use empirical
+                if standardized_score in self.model_params:
+                    params = self.model_params[standardized_score]
+                    
+                    logit = features_full @ params
+                    logit_clipped = np.clip(logit, -50, 50)
+                    model_prob = 1 / (1 + np.exp(-logit_clipped))
+                    
+                    predicted_prob = model_prob
+                    
+                    if debug:
+                        debug_info[home_away_score] = {
+                            'empirical': base_prob,
+                            'standardized_score': standardized_score,
+                            'model_params': params,
+                            'logit': logit,
+                            'model_prob': model_prob,
+                            'final_prob': predicted_prob,
+                            'method': 'model'
+                        }
+                else:
+                    predicted_prob = base_prob
+                    
+                    if debug:
+                        debug_info[home_away_score] = {
+                            'empirical': base_prob,
+                            'standardized_score': standardized_score,
+                            'final_prob': predicted_prob,
+                            'method': 'empirical_only'
+                        }
+                
+                predictions[home_away_score] = predicted_prob
+                
+            except Exception as e:
+                predictions[home_away_score] = self.empirical_distribution.get(home_away_score, 0)
                 continue
         
-        # Calculate 2-way moneyline (ties are void/push)
-        total_decisive = home_win_prob + away_win_prob
-        if total_decisive > 0:
-            home_ml_2way = home_win_prob / total_decisive
-            away_ml_2way = away_win_prob / total_decisive
-        else:
-            home_ml_2way = away_ml_2way = 0.5
+        # Normalize
+        total_prob_before_norm = sum(predictions.values())
+        if total_prob_before_norm > 0:
+            predictions = {score: prob / total_prob_before_norm for score, prob in predictions.items()}
         
-        def prob_to_american_odds(prob):
-            """
-            Convert probability to American odds format.
-            Probability >= 0.5 becomes negative odds (favorite)
-            Probability < 0.5 becomes positive odds (underdog)
-            """
-            if prob <= 0 or prob >= 1:
-                return 0
-            if prob >= 0.5:
-                return int(-100 * prob / (1 - prob))
-            else:
-                return int(100 * (1 - prob) / prob)
+        print(f"Total probability before normalization: {total_prob_before_norm:.6f}\n")
         
-        def calculate_spread_prob(line):
-            """
-            Calculate probability that home team covers a given spread line.
-            Line is the number of points home team must win by.
-            Negative line = home gets points
-            Positive line = home must win by more than line
-            """
-            cover_prob = 0.0
-            for score_combo, prob in all_probs.items():
-                try:
-                    home_score, away_score = map(int, score_combo.split('-'))
-                    margin = home_score - away_score
-                    # Home covers if their margin is greater than the line
-                    if margin > line:
-                        cover_prob += prob
-                except:
-                    continue
-            return cover_prob
-        
-        def round_to_half(value):
-            """
-            Round to nearest 0.5, but avoid whole numbers (always add 0.5 to whole numbers).
-            This ensures no ties/pushes on spread and total bets.
-            """
-            rounded = round(value * 2) / 2
-            if rounded == int(rounded):
-                return rounded + 0.5
-            return rounded
-        
-        # Find optimal Q1 spread line that makes both sides closest to 50%
-        game_spread = spread
-        # Initial guess: quarter of the game spread
-        start_line = round_to_half(game_spread / 4)
-        
-        tested_lines = {}
-        tested_lines[start_line] = calculate_spread_prob(start_line)
-        
-        best_line = start_line
-        best_distance = abs(tested_lines[start_line] - 0.5)
-        
-        # Search in direction that moves closer to 50%
-        direction = 1 if tested_lines[start_line] > 0.5 else -1
-        current_line = start_line + direction
-        
-        # Keep searching while improving and within reasonable bounds
-        while -20.5 <= current_line <= 20.5:
-            prob = calculate_spread_prob(current_line)
-            tested_lines[current_line] = prob
-            distance = abs(prob - 0.5)
+        # Debug output
+        if debug:
+            debug_lines.append("="*80)
+            debug_lines.append("MODEL DIAGNOSTICS")
+            debug_lines.append("="*80)
+            debug_lines.append("")
             
-            if distance < best_distance:
-                best_distance = distance
-                best_line = current_line
-                current_line += direction
-            else:
-                break
-        
-        # Also search in opposite direction in case we started on wrong side
-        opposite_direction = -direction
-        current_line = start_line + opposite_direction
-        
-        while -20.5 <= current_line <= 20.5:
-            prob = calculate_spread_prob(current_line)
-            tested_lines[current_line] = prob
-            distance = abs(prob - 0.5)
-            
-            if distance < best_distance:
-                best_distance = distance
-                best_line = current_line
-                current_line += opposite_direction
-            else:
-                break
-        
-        # The line closest to 50% is our median/fair spread
-        median_spread = best_line
-        
-        # Generate spread lines at different offsets from median for display
-        spread_lines = {}
-        for offset in [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]:
-            line = median_spread + offset
-            if line not in tested_lines:
-                tested_lines[line] = calculate_spread_prob(line)
-            spread_lines[line] = {
-                'home_cover': tested_lines[line],
-                'away_cover': 1 - tested_lines[line],
-                'home_odds': prob_to_american_odds(tested_lines[line]),
-                'away_odds': prob_to_american_odds(1 - tested_lines[line])
+            # Probability mass by bins
+            debug_lines.append("PROBABILITY MASS BY SCORE TOTAL:")
+            score_bins = {
+                '0-6 pts': (0, 6),
+                '7-13 pts': (7, 13),
+                '14-20 pts': (14, 20),
+                '21-27 pts': (21, 27),
+                '28+ pts': (28, 999)
             }
-
-        def calculate_total_prob(line):
-            """
-            Calculate probability that combined score goes over a given total line.
-            """
-            over_prob = 0.0
-            for score_combo, prob in all_probs.items():
-                try:
-                    home_score, away_score = map(int, score_combo.split('-'))
-                    actual_total = home_score + away_score
-                    if actual_total > line:
-                        over_prob += prob
-                except:
+            
+            for bin_name, (min_pts, max_pts) in score_bins.items():
+                bin_prob = 0
+                bin_scores = []
+                for score, info in debug_info.items():
+                    h, a = map(int, score.split('-'))
+                    total_pts = h + a
+                    if min_pts <= total_pts <= max_pts:
+                        bin_prob += info['final_prob']
+                        if info['final_prob'] >= 0.01:
+                            bin_scores.append((score, info['final_prob']))
+                
+                debug_lines.append(f"  {bin_name:<12}: {bin_prob:.4f} ({bin_prob*100:.1f}%)")
+                if bin_scores and bin_name in ['14-20 pts', '21-27 pts', '28+ pts']:
+                    bin_scores.sort(key=lambda x: x[1], reverse=True)
+                    top_contributors = ', '.join([f"{s}:{p*100:.1f}%" for s, p in bin_scores[:3]])
+                    debug_lines.append(f"               Top: {top_contributors}")
+            
+            debug_lines.append("")
+            debug_lines.append(f"Total probability before normalization: {total_prob_before_norm:.6f}")
+            debug_lines.append("")
+            
+            # Detailed analysis of specific problematic scores
+            debug_lines.append("="*80)
+            debug_lines.append("DETAILED SCORE ANALYSIS - PROBLEMATIC CASES")
+            debug_lines.append("="*80)
+            debug_lines.append("")
+            
+            problematic_scores = ['0-0', '7-7', '14-14', '10-0', '10-3', '10-6', '6-3', '0-10']
+            
+            for score_to_check in problematic_scores:
+                # Find the score in either home-away or away-home format
+                found_score = None
+                for home_away_score in all_scores:
+                    home_score, away_score = map(int, home_away_score.split('-'))
+                    
+                    if home_favored:
+                        standardized = f"{home_score}-{away_score}"
+                    else:
+                        standardized = f"{away_score}-{home_score}"
+                    
+                    if standardized == score_to_check or home_away_score == score_to_check:
+                        found_score = home_away_score
+                        break
+                
+                if not found_score or found_score not in debug_info:
                     continue
-            return over_prob
-        
-        # Find optimal Q1 total line (similar process to spread)
-        game_total = total
-        # Initial guess: 20% of game total (Q1 tends to be slightly lower scoring)
-        start_total_line = round_to_half(game_total / 5)
-        
-        tested_total_lines = {}
-        tested_total_lines[start_total_line] = calculate_total_prob(start_total_line)
-        
-        best_total_line = start_total_line
-        best_total_distance = abs(tested_total_lines[start_total_line] - 0.5)
-        
-        # Search for line closest to 50%
-        total_direction = 1 if tested_total_lines[start_total_line] > 0.5 else -1
-        current_total_line = start_total_line + total_direction
-        
-        while 0.5 <= current_total_line <= 35.5:
-            prob = calculate_total_prob(current_total_line)
-            tested_total_lines[current_total_line] = prob
-            distance = abs(prob - 0.5)
+                
+                info = debug_info[found_score]
+                fav, dog = map(int, info['standardized_score'].split('-'))
+                score_total = fav + dog
+                score_margin = abs(fav - dog)
+                
+                debug_lines.append(f"Score: {info['standardized_score']} (Displayed as {found_score})")
+                debug_lines.append("-"*80)
+                debug_lines.append(f"  Score total: {score_total} points")
+                debug_lines.append(f"  Score margin: {score_margin} points")
+                debug_lines.append(f"  Expected Q1 total: {expected_q1_total:.2f} points")
+                debug_lines.append(f"  Ratio (score/expected): {score_total/expected_q1_total:.2f}x")
+                debug_lines.append(f"  Empirical probability: {info['empirical']:.6f} ({info['empirical']*100:.2f}%)")
+                debug_lines.append(f"  Model probability: {info['final_prob']:.6f} ({info['final_prob']*100:.2f}%)")
+                debug_lines.append(f"  Change: {(info['final_prob'] - info['empirical'])*100:+.2f} percentage points")
+                debug_lines.append("")
+                
+                if info['method'] == 'model':
+                    params = info['model_params']
+                    pattern, pattern_total = self.get_score_pattern(info['standardized_score'])
+                    
+                    debug_lines.append(f"  Pattern: {pattern}")
+                    debug_lines.append(f"  Model coefficients:")
+                    debug_lines.append(f"    Intercept: {params[0]:>+8.4f}")
+                    debug_lines.append(f"    Total:     {params[1]:>+8.4f}")
+                    debug_lines.append(f"    Margin:    {params[2]:>+8.4f}")
+                    debug_lines.append("")
+                    
+                    # Check if this is an anchor or inherited
+                    is_anchor = info['standardized_score'] in self.anchor_scores
+                    
+                    if is_anchor:
+                        debug_lines.append(f"  Model Type: ANCHOR (common score with n >= 100)")
+                        score_count = self.historical_data['score_combination'].value_counts().get(info['standardized_score'], 0)
+                        debug_lines.append(f"  Occurrences: {score_count}")
+                    else:
+                        debug_lines.append(f"  Model Type: INHERITED (rare score)")
+                        
+                        # Find inheritance info
+                        anchor_used = None
+                        n_occ = 0
+                        for rare, anchor, n in self.inheritance_log:
+                            if rare == info['standardized_score']:
+                                anchor_used = anchor
+                                n_occ = n
+                                break
+                        
+                        if anchor_used:
+                            debug_lines.append(f"  Occurrences: {n_occ}")
+                            debug_lines.append(f"  Inherited from: {anchor_used}")
+                            
+                            if anchor_used in self.model_params:
+                                anchor_params = self.model_params[anchor_used]
+                                anchor_pattern, anchor_pattern_total = self.get_score_pattern(anchor_used)
+                                
+                                debug_lines.append(f"  Anchor pattern: {anchor_pattern} ({anchor_pattern_total} pts)")
+                                debug_lines.append(f"  Anchor coefficients:")
+                                debug_lines.append(f"    Intercept: {anchor_params[0]:>+8.4f}")
+                                debug_lines.append(f"    Total:     {anchor_params[1]:>+8.4f}  (score uses: {params[1]:>+8.4f}, diff: {params[1]-anchor_params[1]:>+.4f})")
+                                debug_lines.append(f"    Margin:    {anchor_params[2]:>+8.4f}  (score uses: {params[2]:>+8.4f}, diff: {params[2]-anchor_params[2]:>+.4f})")
+                                debug_lines.append("")
+                                debug_lines.append(f"  INHERITANCE ANALYSIS:")
+                                
+                                # Analyze if inheritance makes sense
+                                total_deviation = abs(params[1] - anchor_params[1])
+                                margin_deviation = abs(params[2] - anchor_params[2])
+                                
+                                debug_lines.append(f"    Total coef deviation from anchor: {total_deviation:.4f}")
+                                debug_lines.append(f"    Margin coef deviation from anchor: {margin_deviation:.4f}")
+                                debug_lines.append(f"    Max allowed deviation: 0.5000 (set by bounds)")
+                                
+                                if total_deviation > 0.4:
+                                    debug_lines.append(f"    WARNING: Large deviation in total coefficient")
+                                
+                                # Context analysis
+                                if score_total > expected_q1_total * 2:
+                                    debug_lines.append(f"    CONTEXT WARNING: Score total is {score_total/expected_q1_total:.2f}x expected")
+                                    debug_lines.append(f"    This score is very unlikely in this game total")
+                                    if params[1] > 0:
+                                        debug_lines.append(f"    PROBLEM: Positive total coef ({params[1]:+.4f}) increases probability")
+                                        debug_lines.append(f"    SOLUTION NEEDED: Context-dependent scaling for extreme scores")
+                    
+                    debug_lines.append("")
+                    debug_lines.append(f"  Logit calculation for this game:")
+                    debug_lines.append(f"    = {params[0]:.4f} + {params[1]:.4f}×{feature_total:.4f} + {params[2]:.4f}×{feature_margin:.4f}")
+                    debug_lines.append(f"    = {params[0]:.4f} + {params[1]*feature_total:.4f} + {params[2]*feature_margin:.4f}")
+                    debug_lines.append(f"    = {info['logit']:.4f}")
+                    debug_lines.append(f"    → Probability = 1/(1+e^(-{info['logit']:.4f})) = {info['model_prob']:.6f}")
+                    
+                    # Show what happens at different totals
+                    debug_lines.append("")
+                    debug_lines.append(f"  SENSITIVITY ANALYSIS - How probability changes with total:")
+                    test_totals = [40, 45, 50, 55, 60, 65]
+                    for test_total in test_totals:
+                        test_implied_fav = (test_total + abs_spread) / 2
+                        test_implied_dog = (test_total - abs_spread) / 2
+                        test_norm_fav = test_implied_fav / typical_game_score
+                        test_norm_dog = test_implied_dog / typical_game_score
+                        test_feature_total = test_norm_fav + test_norm_dog
+                        
+                        test_logit = params[0] + params[1] * test_feature_total + params[2] * feature_margin
+                        test_prob = 1 / (1 + np.exp(-np.clip(test_logit, -50, 50)))
+                        
+                        debug_lines.append(f"    Total {test_total}: {test_prob:.6f} ({test_prob*100:.2f}%)")
+                    
+                else:
+                    debug_lines.append(f"  Model Type: EMPIRICAL ONLY (no model fitted)")
+                
+                debug_lines.append("")
+                debug_lines.append("")
             
-            if distance < best_total_distance:
-                best_total_distance = distance
-                best_total_line = current_total_line
-                current_total_line += total_direction
-            else:
-                break
-        
-        # Search opposite direction
-        opposite_total_direction = -total_direction
-        current_total_line = start_total_line + opposite_total_direction
-        
-        while 0.5 <= current_total_line <= 35.5:
-            prob = calculate_total_prob(current_total_line)
-            tested_total_lines[current_total_line] = prob
-            distance = abs(prob - 0.5)
+            debug_lines.append("="*80)
             
-            if distance < best_total_distance:
-                best_total_distance = distance
-                best_total_line = current_total_line
-                current_total_line += opposite_total_direction
-            else:
-                break
+            with open('debug_output.txt', 'w') as f:
+                f.write('\n'.join(debug_lines))
+            
+            print("Debug output saved to: debug_output.txt\n")
         
-        median_total = best_total_line
-
-        # Generate total lines at different offsets from median
-        total_lines = {}
-        for offset in [-2.0, -1.0, 0.0, 1.0, 2.0]:
-            line = median_total + offset
-            if line > 0:
-                if line not in tested_total_lines:
-                    tested_total_lines[line] = calculate_total_prob(line)
-                total_lines[line] = {
-                    'over': tested_total_lines[line],
-                    'under': 1 - tested_total_lines[line],
-                    'over_odds': prob_to_american_odds(tested_total_lines[line]),
-                    'under_odds': prob_to_american_odds(1 - tested_total_lines[line])
-                }
+        # Display results
+        sorted_predictions = sorted(predictions.items(), key=lambda x: x[1], reverse=True)
+        filtered_predictions = [(score, prob) for score, prob in sorted_predictions if prob >= 0.0005]
         
-        # Special markets: probability of draw with over certain totals
-        # Useful for parlay constructions
-        draw_over_10_5 = 0.0
-        draw_over_12_5 = 0.0
-        for score_combo, prob in all_probs.items():
-            try:
-                home_score, away_score = map(int, score_combo.split('-'))
-                if home_score == away_score:
-                    total_pts = home_score + away_score
-                    if total_pts > 10.5:
-                        draw_over_10_5 += prob
-                    if total_pts > 12.5:
-                        draw_over_12_5 += prob
-            except:
-                continue
-        
-        # Return all betting markets
-        return {
-            'moneyline_2way': {
-                'home': home_ml_2way,
-                'away': away_ml_2way,
-                'home_odds': prob_to_american_odds(home_ml_2way),
-                'away_odds': prob_to_american_odds(away_ml_2way)
-            },
-            'moneyline_3way': {
-                'home': home_win_prob,
-                'away': away_win_prob,
-                'draw': tie_prob,
-                'home_odds': prob_to_american_odds(home_win_prob),
-                'away_odds': prob_to_american_odds(away_win_prob),
-                'draw_odds': prob_to_american_odds(tie_prob)
-            },
-            'spread': spread_lines,
-            'total': total_lines,
-            'draw_and_over_10_5': draw_over_10_5,
-            'draw_and_over_12_5': draw_over_12_5
-        }
-    
-    def predict(self, spread, total):
-        """
-        Main prediction function: generates full probability distribution and all betting markets.
-        Displays detailed output showing:
-        - How probabilities were adjusted from empirical baseline
-        - All scores with meaningful probability
-        - All betting markets with odds
-        
-        Args:
-            spread: pregame point spread
-            total: pregame total points line
-        """
-        # Get probability distribution over all scores
-        all_probs = self.predict_score_probabilities(spread, total)
-        
-        print(f"\n{'='*80}")
-        print(f"PREDICTION: Spread {spread:+.1f}, Total {total:.1f}")
-        print(f"{'='*80}")
-        
-        # Show how model adjusted probabilities from baseline
-        print(f"\nProbability Adjustment Analysis (Top 15 Scores):")
-        print(f"{'Score':<10} {'Empirical':<12} {'Adjusted':<12} {'Change':<12} {'Final %'}")
+        print(f"Scores with Probability > 0.05%:")
+        print(f"{'Rank':<6} {'Score':<10} {'Probability':<12} {'Percentage'}")
         print("-" * 70)
         
-        sorted_final = sorted(all_probs.items(), key=lambda x: x[1], reverse=True)[:15]
-        for score, final_prob in sorted_final:
-            emp_prob = self.empirical_distribution.get(score, 0)
-            change = final_prob - emp_prob
-            print(f"{score:<10} {emp_prob:<12.6f} {final_prob:<12.6f} {change:+12.6f} {final_prob*100:.2f}%")
+        cumulative_prob = 0
+        for rank, (score, prob) in enumerate(filtered_predictions, 1):
+            cumulative_prob += prob
+            print(f"{rank:<6} {score:<10} {prob:<12.6f} {prob*100:>6.2f}%")
         
-        # Display all scores with non-trivial probability
-        print(f"\n{'='*80}")
-        print(f"SCORES WITH PROBABILITY >= 0.5%")
-        print(f"{'='*80}")
-        
-        filtered_probs = {k: v for k, v in all_probs.items() if v >= 0.005}
-        sorted_scores = sorted(filtered_probs.items(), key=lambda x: x[1], reverse=True)
-        
-        print(f"{'Score':<10} {'Probability':<15} {'Percentage'}")
-        print("-" * 50)
-        for score, prob in sorted_scores:
-            print(f"{score:<10} {prob:<15.6f} {prob*100:.2f}%")
-        
-        # Calculate all betting markets
-        markets = self.calculate_betting_markets(all_probs, spread, total)
-        
-        print(f"\n{'='*80}")
-        print(f"BETTING MARKETS")
-        print(f"{'='*80}")
-        
-        # Display moneyline markets
-        ml2 = markets['moneyline_2way']
-        print(f"\n2-Way Moneyline (Draws Void):")
-        print(f"  Home: {ml2['home']:.4f} ({ml2['home']*100:.2f}%) - Odds: {ml2['home_odds']:+d}")
-        print(f"  Away: {ml2['away']:.4f} ({ml2['away']*100:.2f}%) - Odds: {ml2['away_odds']:+d}")
-        
-        ml3 = markets['moneyline_3way']
-        print(f"\n3-Way Moneyline:")
-        print(f"  Home: {ml3['home']:.4f} ({ml3['home']*100:.2f}%) - Odds: {ml3['home_odds']:+d}")
-        print(f"  Draw: {ml3['draw']:.4f} ({ml3['draw']*100:.2f}%) - Odds: {ml3['draw_odds']:+d}")
-        print(f"  Away: {ml3['away']:.4f} ({ml3['away']*100:.2f}%) - Odds: {ml3['away_odds']:+d}")
-        
-        # Display spread markets at various lines
-        print(f"\nSpread Markets:")
-        for line in sorted(markets['spread'].keys()):
-            sp = markets['spread'][line]
-            print(f"  Line {-line:+.1f}: Home {sp['home_cover']:.4f} ({sp['home_cover']*100:.2f}%, {sp['home_odds']:+d}) | Away {sp['away_cover']:.4f} ({sp['away_cover']*100:.2f}%, {sp['away_odds']:+d})")
-        
-        # Display total markets at various lines
-        print(f"\nTotal Markets:")
-        for line in sorted(markets['total'].keys()):
-            tot = markets['total'][line]
-            print(f"  Line {line:.1f}: Over {tot['over']:.4f} ({tot['over']*100:.2f}%, {tot['over_odds']:+d}) | Under {tot['under']:.4f} ({tot['under']*100:.2f}%, {tot['under_odds']:+d})")
-        
-        # Display special draw markets
-        print(f"\nSpecial Markets:")
-        print(f"  Draw and Over 10.5: {markets['draw_and_over_10_5']:.4f} ({markets['draw_and_over_10_5']*100:.2f}%)")
-        print(f"  Draw and Over 12.5: {markets['draw_and_over_12_5']:.4f} ({markets['draw_and_over_12_5']*100:.2f}%)")
-    
-    def calculate_parlay_probability(self, all_probs, selections):
-        """
-        Calculate probability of a parlay (multiple bets that all must win) using full score distribution.
-        
-        Works by iterating through all possible scores and checking if each score satisfies
-        ALL conditions in the parlay. Sums probabilities of qualifying scores.
-        
-        Args:
-            all_probs: complete probability distribution over scores
-            selections: list of bet dictionaries, each containing:
-                - type: 'spread', 'total', 'moneyline', or 'moneyline_3way'
-                - team/side: which side of bet
-                - line: the line value (for spread/total)
-        
-        Example selections:
-        [
-            {'type': 'spread', 'team': 'home', 'line': -3.5},
-            {'type': 'total', 'side': 'over', 'line': 9.5},
-            {'type': 'moneyline', 'team': 'away'}
-        ]
-        
-        Returns:
-            Probability that all selections win (parlay hits)
-        """
-        parlay_prob = 0.0
-        
-        # Iterate through all possible score combinations
-        for score_combo, prob in all_probs.items():
-            try:
-                home_score, away_score = map(int, score_combo.split('-'))
-                
-                # Check if this score satisfies ALL selections in the parlay
-                all_conditions_met = True
-                
-                for selection in selections:
-                    # Check spread bets
-                    if selection['type'] == 'spread':
-                        margin = home_score - away_score
-                        line = selection['line']
-                        
-                        if selection['team'] == 'home':
-                            # Home covers if margin beats the spread
-                            # If line is -2.5 (home favored), margin must be > 2.5
-                            # If line is +2.5 (home underdog), margin must be > -2.5
-                            if margin <= -line:
-                                all_conditions_met = False
-                                break
-                        else:  # away
-                            # Away covers if they beat the spread from their perspective
-                            # If line is -2.5 (home favored, away gets +2.5), away margin must be < -2.5
-                            # If line is +2.5 (away favored), away margin must be < 2.5
-                            if margin >= -line:
-                                all_conditions_met = False
-                                break
-                    
-                    # Check total bets
-                    elif selection['type'] == 'total':
-                        total = home_score + away_score
-                        if selection['side'] == 'over':
-                            if total <= selection['line']:
-                                all_conditions_met = False
-                                break
-                        else:  # under
-                            if total >= selection['line']:
-                                all_conditions_met = False
-                                break
-                    
-                    # Check 2-way moneyline bets (ties void)
-                    elif selection['type'] == 'moneyline':
-                        if selection['team'] == 'home':
-                            if home_score <= away_score:
-                                all_conditions_met = False
-                                break
-                        else:  # away
-                            if away_score <= home_score:
-                                all_conditions_met = False
-                                break
-                    
-                    # Check 3-way moneyline bets (ties are a separate outcome)
-                    elif selection['type'] == 'moneyline_3way':
-                        if selection['team'] == 'home':
-                            if home_score <= away_score:
-                                all_conditions_met = False
-                                break
-                        elif selection['team'] == 'away':
-                            if away_score <= home_score:
-                                all_conditions_met = False
-                                break
-                        elif selection['team'] == 'draw':
-                            if home_score != away_score:
-                                all_conditions_met = False
-                                break
-                
-                # If this score satisfies all conditions, add its probability to parlay total
-                if all_conditions_met:
-                    parlay_prob += prob
-                    
-            except:
-                continue
-        
-        return parlay_prob
+        print(f"\nDisplayed {len(filtered_predictions)} scores")
+        print(f"Cumulative probability: {cumulative_prob*100:.2f}%")
 
-    def prob_to_american_odds(self, prob):
-        """
-        Convert probability to American odds format.
+        print(f"Probability of draw and Over 12.5 points: {predictions.get('7-7', 0) + predictions.get('10-10', 0) + predictions.get('14-14', 0):.4f}")
         
-        American odds format:
-        - Negative odds (e.g. -150): amount you must bet to win $100
-        - Positive odds (e.g. +200): amount you win if you bet $100
-        
-        Favorites (prob >= 0.5) get negative odds
-        Underdogs (prob < 0.5) get positive odds
-        """
-        if prob <= 0 or prob >= 1:
-            return 0
-        if prob >= 0.5:
-            return int(-100 * prob / (1 - prob))
-        else:
-            return int(100 * (1 - prob) / prob)
+        return {
+            'home_away_format': predictions,
+            'abs_spread': abs_spread,
+            'home_favored': home_favored,
+            'debug_info': debug_info if debug else None
+        }
 
-    def calculate_parlay_payout(self, prob):
-        """
-        Calculate parlay payout from true probability.
-        Converts probability to American odds to show potential payout.
-        
-        Args:
-            prob: true probability of parlay hitting
-            
-        Returns:
-            American odds representing the fair payout
-        """
-        if prob <= 0 or prob >= 1:
-            return 0
-        # Convert to decimal odds
-        decimal_odds = 1 / prob
-        # Return American odds
-        return self.prob_to_american_odds(prob)
-
-# Load environment variables from .env file for database credentials
 load_dotenv()
 
 def main():
-    """
-    Main execution function.
-    
-    Steps:
-    1. Load database configuration from environment variables
-    2. Initialize predictor and load historical data
-    3. Calculate empirical distribution
-    4. Fit statistical models
-    5. Enter interactive loop for predictions
-    """
-    # Database configuration from environment variables
-    # Uses defaults if environment variables not set
+    """Main execution function."""
     db_config = {
         'host': os.getenv('DB_HOST', '127.0.0.1'),
         'port': int(os.getenv('DB_PORT', 3306)),
@@ -1056,63 +858,62 @@ def main():
         'database': os.getenv('DB_NAME', 'cfb')
     }
     
-    # Initialize the predictor
     predictor = CFBQuarterScorePredictor(db_config)
     
     print("="*80)
-    print("CFB QUARTER 1 SCORE PREDICTOR")
+    print("CFB QUARTER 1 SCORE PREDICTOR - COEFFICIENT INHERITANCE")
+    print("="*80)
+    print("Improvements:")
+    print("  ✓ Anchor models for common scores (n >= 100)")
+    print("  ✓ Coefficient inheritance for rare scores")
+    print("  ✓ Strong regularization toward anchor coefficients")
+    print("  ✓ No hardcoded buckets - intelligent borrowing")
     print("="*80)
     
-    # Load all historical first quarter data
     print("\nLoading historical data...")
     if not predictor.load_historical_data():
         print("Failed to load data")
         return
     
-    # Calculate baseline probability distribution
     print("\nCalculating empirical distribution...")
     predictor.calculate_empirical_distribution()
     
-    # Fit logistic regression models for each score
-    print("\nFitting model...")
+    print("\nFitting models...")
     predictor.fit_model()
-
-    # Load calibration data from market
-    calibration_folder = '/Users/jarrettlysek/Documents/PythonWork/CFB/Q1/Calibration'
-    print("\nLoading market calibration data...")
-    predictor.load_calibration_data(calibration_folder)
 
     print("\n" + "="*80)
     print("MODEL READY")
     print("="*80)
-    print("Enter spread and total for predictions")
+    print("Enter signed spread and total for predictions")
     print("Format: spread total (e.g., -3.5 58.5)")
+    print("Add 'debug' for detailed output")
     print("Type 'quit' to exit\n")
     
-    # Interactive prediction loop
     while True:
         try:
-            # Get user input
-            user_input = input("Enter spread and total (Ex Home team favored by 3.5 (if home team is favored use negative sign for spread) and total of 50.5 should be entered as: -3.5 50.5 ): ").strip()
+            print("\n(Ex: Home favored by 3.5 with total 50.5 -> enter: -3.5 50.5)")
+            print("(Ex: Away favored by 6.5 with total 54.5 -> enter: 6.5 54.5)")
+            user_input = input("Enter spread and total: ").strip()
             if user_input.lower() in ['quit', 'exit', 'q']:
                 break
+            
+            debug_mode = 'debug' in user_input.lower()
+            if debug_mode:
+                user_input = user_input.lower().replace('debug', '').strip()
                 
-            # Parse spread and total from input
             parts = user_input.split()
             if len(parts) != 2:
                 print("Enter two numbers: spread and total")
                 continue
                 
-            spread = float(parts[0])
+            pregame_spread = float(parts[0])
             total = float(parts[1])
             
-            # Validate input ranges
-            if not (-50 <= spread <= 50) or not (30 <= total <= 90):
+            if not (-50 <= pregame_spread <= 50) or not (30 <= total <= 90):
                 print("Use realistic values: spread -50 to 50, total 30 to 90")
                 continue
                 
-            # Generate and display prediction
-            predictor.predict(spread, total)
+            predictor.predict(pregame_spread, total, debug=debug_mode)
             
         except ValueError:
             print("Enter valid numbers")

@@ -201,6 +201,95 @@ class CFBDataUpdater:
         existing_games = {row[0] for row in self.cursor.fetchall()}
         return existing_games
     
+    def backfill_historical_seasons(self, start_season: int, end_season: int):
+        """
+        Backfill historical data for seasons that don't exist in database.
+        Used to populate 2014-2017 data.
+        
+        Args:
+            start_season: First season to backfill (e.g., 2014)
+            end_season: Last season to backfill (e.g., 2017)
+        """
+        print("="*60)
+        print(f"BACKFILLING HISTORICAL DATA: {start_season}-{end_season}")
+        print("="*60)
+        
+        for season in range(start_season, end_season + 1):
+            print(f"\n{'='*60}")
+            print(f"Processing {season} season...")
+            print(f"{'='*60}")
+            
+            # Check if we already have data for this season
+            self.cursor.execute("""
+                SELECT COUNT(*) FROM games WHERE season = %s
+            """, (season,))
+            existing_count = self.cursor.fetchone()[0]
+            
+            print(f"Existing games in database for {season}: {existing_count}")
+            
+            # If we already have substantial data, skip
+            if existing_count > 500:
+                print(f"Season {season} already has {existing_count} games, skipping...")
+                continue
+            
+            # For historical seasons, process all weeks
+            # Regular season is typically weeks 1-15, plus week 0 for some early games
+            weeks_to_process = list(range(0, 16))
+            
+            games_added = 0
+            
+            for week in weeks_to_process:
+                try:
+                    print(f"\nProcessing {season} Week {week}...")
+                    
+                    # Fetch games for this week
+                    games = self.fetch_games_for_week(season, week)
+                    
+                    if not games:
+                        continue
+                    
+                    # Fetch betting lines
+                    betting_data = self.fetch_betting_lines(season, week)
+                    
+                    # Store each game
+                    for game_data in games:
+                        try:
+                            self.store_game_data(game_data, betting_data)
+                            games_added += 1
+                        except Exception as e:
+                            print(f"    Error storing game {game_data.get('game_id')}: {e}")
+                            continue
+                    
+                    # Commit after each week
+                    self.connection.commit()
+                    print(f"  Week {week}: {len(games)} games processed, {games_added} total added")
+                    
+                    # Small delay to be respectful of API rate limits
+                    time.sleep(1)
+                    
+                except Exception as e:
+                    print(f"  Error processing {season} week {week}: {e}")
+                    continue
+            
+            print(f"\n{season} Season Complete:")
+            print(f"  Total games added: {games_added}")
+            
+            # Verify season data
+            self.cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_games,
+                    SUM(CASE WHEN pregame_spread IS NOT NULL THEN 1 ELSE 0 END) as with_spread,
+                    SUM(CASE WHEN pregame_total IS NOT NULL THEN 1 ELSE 0 END) as with_total
+                FROM games 
+                WHERE season = %s
+            """, (season,))
+            
+            result = self.cursor.fetchone()
+            print(f"  Verification - Total: {result[0]}, With Spread: {result[1]}, With Total: {result[2]}")
+        
+        print("\n" + "="*60)
+        print("HISTORICAL BACKFILL COMPLETE")
+        print("="*60)
     def moneyline_to_probability(self, home_ml: Optional[float], away_ml: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
         """Convert American moneyline odds to implied probabilities"""
         if not home_ml or not away_ml:
@@ -468,20 +557,50 @@ class CFBDataUpdater:
         
         print("Updating current season data...")
         
+        # Get the maximum week already in database for current season
         self.cursor.execute("""
-            SELECT DISTINCT week FROM games 
-            WHERE season = %s 
-            ORDER BY week DESC
+            SELECT MAX(week) FROM games 
+            WHERE season = %s
         """, (current_year,))
         
-        existing_weeks = {row[0] for row in self.cursor.fetchall()}
-        max_week_to_check = 6
+        max_week_result = self.cursor.fetchone()
+        max_week_in_db = max_week_result[0] if max_week_result[0] is not None else -1
         
-        weeks_to_update = list(range(0, max_week_to_check))
+        print(f"Latest week in database: {max_week_in_db}")
+        
+        # Start from week after the latest one in database, up to week 16 (covers regular season + conference championship)
+        # If no data exists, start from week 0
+        start_week = 0 if max_week_in_db == -1 else max_week_in_db
+        max_week_to_check = 16
+        
+        weeks_to_update = list(range(start_week, max_week_to_check + 1))
         print(f"Checking weeks: {weeks_to_update}")
         
+        games_found = False
+        consecutive_empty_weeks = 0
+        
+        # Loop through weeks and stop after finding 3 consecutive weeks with no games
         for week in weeks_to_update:
             self.update_season_data(current_year, week)
+            
+            # Check if this week had any games
+            self.cursor.execute("""
+                SELECT COUNT(*) FROM games 
+                WHERE season = %s AND week = %s
+            """, (current_year, week))
+            
+            week_game_count = self.cursor.fetchone()[0]
+            
+            if week_game_count > 0:
+                games_found = True
+                consecutive_empty_weeks = 0
+            else:
+                consecutive_empty_weeks += 1
+                
+            # If we've hit 3 consecutive empty weeks after finding some games, stop checking
+            if games_found and consecutive_empty_weeks >= 3:
+                print(f"No games found for 3 consecutive weeks, stopping at week {week}")
+                break
     
     def close_connection(self):
         """Close database connection"""
@@ -510,7 +629,29 @@ def main():
         print("Initializing CFB Data Updater...")
         updater = CFBDataUpdater(API_KEY, DB_CONFIG)
         
+        # Check if we need to backfill historical data
+        updater.cursor.execute("SELECT MIN(season) FROM games")
+        min_season_result = updater.cursor.fetchone()
+        min_season = min_season_result[0] if min_season_result[0] else 9999
+        
+        # If earliest season is 2018 or later, backfill 2014-2017
+        if min_season >= 2018:
+            print("\n" + "="*60)
+            print("DETECTED MISSING HISTORICAL DATA")
+            print(f"Current earliest season: {min_season}")
+            print("="*60)
+            
+            response = input("\nBackfill 2014-2017 data? This will take 10-15 minutes. (y/n): ")
+            
+            if response.lower() == 'y':
+                updater.backfill_historical_seasons(2014, 2017)
+            else:
+                print("Skipping historical backfill")
+        
+        # Update current season
         print("\n" + "="*60)
+        print("UPDATING CURRENT SEASON")
+        print("="*60)
         updater.update_current_season()
         
         print("\n" + "="*60)
@@ -530,7 +671,13 @@ def main():
         """)
         games_with_betting = updater.cursor.fetchone()[0]
         
+        updater.cursor.execute("""
+            SELECT MIN(season), MAX(season) FROM games
+        """)
+        season_range = updater.cursor.fetchone()
+        
         print(f"Database Summary:")
+        print(f"  Season range: {season_range[0]}-{season_range[1]}")
         print(f"  Total games: {total_games:,}")
         print(f"  Quarter records: {total_quarters:,}")
         print(f"  Games with betting data: {games_with_betting:,}")
@@ -538,12 +685,15 @@ def main():
         
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         
     finally:
         try:
             updater.close_connection()
         except:
             pass
+
 
 if __name__ == "__main__":
     main()

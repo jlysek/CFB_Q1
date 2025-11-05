@@ -1,814 +1,442 @@
 # Statistical Methodology
 
-This document breaks down the statistical methods used in the College Football Quarter Scoring Prediction Model.
-
----
+This document explains the statistical methods used in the College Football Quarter 1 Score Prediction Model. The approach uses orthogonal feature decomposition and two-tier logistic regression to predict Q1 score probability distributions.
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Understanding Probability Distributions](#understanding-probability-distributions)
-  - [Empirical vs Model-Based Distributions](#empirical-vs-model-based-distributions)
-- [Building the Empirical Distribution](#building-the-empirical-distribution)
-- [Independent Binary Logistic Regression](#independent-binary-logistic-regression)
-  - [Part 1: Understanding Logistic Functions](#part-1-understanding-logistic-functions)
-  - [Part 2: Simple Logistic Regression](#part-2-simple-logistic-regression)
-  - [Part 3: One-vs-All Binary Classification](#part-3-one-vs-all-binary-classification)
-  - [Part 4: Making Predictions](#part-4-making-predictions)
-  - [Part 5: Training the Model](#part-5-training-the-model)
-  - [Part 6: Feature Normalization](#part-6-feature-normalization)
-- [Regularization and Overfitting](#regularization-and-overfitting)
-- [Market Calibration Layer](#market-calibration-layer)
-- [Distance-Based Adjustment for Rare Scores](#distance-based-adjustment-for-rare-scores)
-- [Putting It All Together](#putting-it-all-together)
+- [Understanding the Problem](#understanding-the-problem)
+- [Feature Engineering](#feature-engineering)
+- [Two-Tier Model Architecture](#two-tier-model-architecture)
+- [Empirical Q1 Calibration](#empirical-q1-calibration)
+- [Training Process](#training-process)
+- [Making Predictions](#making-predictions)
 - [Worked Example](#worked-example)
+- [Key Takeaways](#key-takeaways)
 
 ---
 
 ## Overview
 
-**Goal:** Given pregame closing betting markets (spread and total), what is the probability of every possible first quarter score?
+**Goal:** Given pregame spread and total, predict the probability distribution over all possible Q1 scores.
 
-### Example
+**Input:**
+- Pregame spread (negative = home favored)
+- Pregame total (expected full game points)
 
-- **Spread:** Home team favored by 7 points (spread = -7)
-- **Total:** 58.5 points expected in the full game
-- **Question:** What's the probability Q1 ends 7-7? 14-7? 0-0? 7-3?
+**Output:**
+- Probability for every possible Q1 score (0-0, 7-0, 7-7, 14-0, etc.)
+- Valid probability distribution (all probabilities ≥ 0, sum to 1)
 
-### Approach: Independent Binary Logistic Regression with Market Calibration
+**Method:** Independent binary logistic regression with orthogonal features and adaptive regularization.
 
-We use a **one-vs-all** approach where each score gets its own independent binary logistic regression model. Each model predicts `P(this_score | Spread, Total)` independently. The models are then normalized and calibrated against market data.
+### Why Orthogonal Features?
 
-The pipeline consists of three layers:
+Traditional approach uses spread and total directly as features:
+```
+Problem: spread and total are CORRELATED
+- High total games often have smaller spreads (both teams score)
+- Blowout games often have lower totals (one team dominates)
+- Correlation ≈ -0.3 to -0.4 in CFB data
+```
 
-1. **Model Layer:** Independent binary logistic regression for each score
-2. **Normalization Layer:** Ensure probabilities sum to 1
-3. **Calibration Layer:** Blend model predictions with market data
+This correlation causes **multicollinearity**, leading to:
+- Unstable coefficient estimates
+- Difficult interpretation (effects are entangled)
+- Poor generalization to new data
 
-This approach allows for flexible per-score regularization and handles 300+ possible scores efficiently.
+**Solution:** Transform features to eliminate correlation.
 
 ---
 
-## Understanding Probability Distributions
+## Understanding the Problem
 
-A probability distribution assigns a probability to every possible outcome. Probabilities must sum to exactly 1 (or 100%).
+### Probability Distributions
 
-### Simple Example - Rolling a Die
+A probability distribution assigns a probability to every possible outcome. All probabilities must sum to 1.
+
+**Example: Rolling a die**
 
 | Outcome | Probability |
 |---------|-------------|
-| 1 | 1/6 ≈ 0.167 |
-| 2 | 1/6 ≈ 0.167 |
-| 3 | 1/6 ≈ 0.167 |
-| 4 | 1/6 ≈ 0.167 |
-| 5 | 1/6 ≈ 0.167 |
-| 6 | 1/6 ≈ 0.167 |
-| **Total** | **1.0 (100%)** |
+| 1 | 1/6 ≈ 16.7% |
+| 2 | 1/6 ≈ 16.7% |
+| 3 | 1/6 ≈ 16.7% |
+| 4 | 1/6 ≈ 16.7% |
+| 5 | 1/6 ≈ 16.7% |
+| 6 | 1/6 ≈ 16.7% |
+| **Sum** | **1.0 (100%)** |
 
-### Conditional Probability Example
+### Our Application: Q1 Scores
 
-`P(x > 4 | x is even)` = "Probability x is greater than 4 GIVEN x is even"
-
-Since x is even, possible outcomes shrink to: `{2, 4, 6}`
-
-`P(x > 4 | x is even) = P(6) / P(2,4,6) = (1/6) / (3/6) = 1/3`
-
-> The "|" symbol means "given" in probability notation
-
-### Our Application - Q1 Scores
+From 7000+ games, empirical distribution:
 
 | Score | Probability |
 |-------|-------------|
-| 0-0 | 0.071 |
-| 7-0 | 0.110 |
-| 0-7 | 0.071 |
-| 7-7 | 0.076 |
-| 14-0 | 0.066 |
+| 7-0 | 11.0% |
+| 7-7 | 7.6% |
+| 0-7 | 7.1% |
+| 0-0 | 7.1% |
+| 14-0 | 6.6% |
 | ... | ... |
-| **Total** | **1.0 (100%)** |
+| **Sum** | **100%** |
 
----
+### Conditional Probability
 
-## Empirical vs Model-Based Distributions
+We want: `P(Q1 Score | Spread, Total)`
 
-### Empirical Distribution: Built from real data
-- Count how often each outcome happened historically
-- Turn counts into percentages
-- Represents unconditional baseline probabilities
-
-### Model-Based Distribution: Conditional on game features
-- Use statistical models to adjust probabilities based on game characteristics
-- Incorporates pregame betting information (spread and total)
-- Represents conditional probabilities: `P(score | spread, total)`
-
-**We use both:** Start with empirical frequencies as a baseline, then train models that adjust predictions based on game-specific information.
-
----
-
-## Building the Empirical Distribution
-
-### Step 1: Collect Historical Data
-
-Every FBS college football game since 2014 with:
-- Quarter-by-quarter scoring
-- Pregame closing spread and total
-- Team classifications
-
-### Step 2: Count Score Occurrences
-
-From actual model output (approximately 7,000 games):
-
-| Score | Count | Probability |
-|-------|-------|-------------|
-| 7-0 | 765 | 0.110 (11.0%) |
-| 7-7 | 528 | 0.076 (7.6%) |
-| 0-7 | 490 | 0.071 (7.1%) |
-| 0-0 | 490 | 0.071 (7.1%) |
-| 14-0 | 460 | 0.066 (6.6%) |
-| 3-0 | 320 | 0.046 (4.6%) |
-| ... | ... | ... |
-
-### Step 3: Use as Foundation
-
-This empirical distribution serves three purposes:
-
-1. **Baseline:** Starting point for all predictions
-2. **Regularization anchor:** Prevents wild predictions for rare scores
-3. **Training target:** Models learn to adjust from this baseline
-
----
-
-## Independent Binary Logistic Regression
-
-This is the core of the prediction model. Unlike traditional multinomial logistic regression with softmax, we use a **one-vs-all** approach with independent binary models.
-
-### Part 1: Understanding Logistic Functions
-
-#### From Probability to Logit
-
-Regression works best with numbers ranging from -∞ to +∞. Probabilities are constrained between 0 and 1.
-
-We transform probabilities using the **logit function**:
-
-```
-logit(p) = log(p / (1-p))
-```
-
-**What this does:**
-
-| Probability | Logit Value | Interpretation |
-|-------------|-------------|----------------|
-| 0.01 (1%) | -4.6 | Very unlikely |
-| 0.10 (10%) | -2.2 | Unlikely |
-| 0.50 (50%) | 0.0 | Even odds |
-| 0.90 (90%) | +2.2 | Likely |
-| 0.99 (99%) | +4.6 | Very likely |
-
-Now we can work with unbounded numbers, which regression handles well.
-
-#### From Logit Back to Probability
-
-The inverse operation (sigmoid function):
-
-```
-p = 1 / (1 + exp(-logit))
-```
-
-This maps any number back to a probability between 0 and 1.
-
----
-
-### Part 2: Simple Logistic Regression
-
-Before understanding one-vs-all, consider regular binary logistic regression.
-
-**Example Goal:** Predict if home team wins based on spread.
-
-```
-logit(p_win) = β₀ + β₁ × spread
-```
-
-**What coefficients mean:**
-- `β₀` (intercept): Baseline log-odds when spread is 0
-- `β₁` (slope): How spread affects win probability
-
-**Example with learned values:**
-
-```
-logit(p_win) = 0.0 + 0.3 × spread
-```
-
-Note: Spread is negative when home is favored, positive when away is favored.
-
-| Scenario | Calculation | Result |
-|----------|-------------|--------|
-| Spread = -7 (home favored) | logit = -2.1 | p_win = 0.89 (89%) |
-| Spread = 0 (pick'em) | logit = 0.0 | p_win = 0.50 (50%) |
-| Spread = +7 (home underdog) | logit = +2.1 | p_win = 0.11 (11%) |
-
----
-
-### Part 3: One-vs-All Binary Classification
-
-**One-vs-all** means we train a separate binary classifier for each possible Q1 score. Each model answers: "Given the spread and total, is THIS specific score likely?"
-
-#### The Setup
-
-For each of 300+ possible scores, we train an independent model:
-
-```
-logit(score) = β₀ + β₁ × spread + β₂ × total + β₃ × spread² + β₄ × total²
-```
-
-**5 coefficients per score:**
-
-1. `β₀`: Baseline log-odds for this score at neutral game conditions
-2. `β₁`: Spread effect - How spread impacts this score's likelihood
-3. `β₂`: Total effect - How total impacts this score's likelihood
-4. `β₃`: Non-linear spread effect - Captures diminishing or accelerating spread effects
-5. `β₄`: Non-linear total effect - Captures non-linear total effects
-
-#### Training Data Structure
-
-For each score, we create a binary classification problem:
-
-**Example: Training the "7-0" model**
-
-| Game | Spread | Total | Actual Score | Binary Target |
-|------|--------|-------|--------------|---------------|
-| 1 | -7.5 | 58.5 | 7-0 | 1 |
-| 2 | -3.0 | 52.0 | 3-0 | 0 |
-| 3 | -10.5 | 61.0 | 7-0 | 1 |
-| 4 | +2.5 | 48.5 | 0-7 | 0 |
-| ... | ... | ... | ... | ... |
-
-#### Why Quadratic Terms?
-
-Relationships aren't always linear. Consider:
-
-- **Spread effect on 14-0 scores:**
-  - Spread -3 → -6: Moderate increase in 14-0 probability
-  - Spread -28 → -31: Minimal additional increase (already very likely blowout)
-
-- **Total effect on 7-7 scores:**
-  - Total 45 → 55: Significant increase in 7-7 probability (more scoring)
-  - Total 75 → 85: Diminishing effect (score becomes less balanced at extremes)
-
-Quadratic terms capture these non-linear relationships.
-
----
-
-### Part 4: Making Predictions
-
-When predicting for a new game, each score's independent model produces a raw probability estimate.
-
-**Step 1: Calculate logit for each score using its trained model**
-
-```
-logit_7-0 = β₀₁ + β₁₁ × spread + β₂₁ × total + β₃₁ × spread² + β₄₁ × total²
-logit_7-7 = β₀₂ + β₁₂ × spread + β₂₂ × total + β₃₂ × spread² + β₄₂ × total²
-logit_0-7 = β₀₃ + β₁₃ × spread + β₂₃ × total + β₃₃ × spread² + β₄₃ × total²
-...
-```
-
-**Step 2: Convert each logit to raw probability using sigmoid**
-
-```
-raw_prob(7-0) = 1 / (1 + exp(-logit_7-0))
-raw_prob(7-7) = 1 / (1 + exp(-logit_7-7))
-raw_prob(0-7) = 1 / (1 + exp(-logit_0-7))
-...
-```
-
-**Step 3: Normalize probabilities to sum to 1**
-
-Since each model was trained independently, raw probabilities don't automatically sum to 1:
-
-```
-p(score_i) = raw_prob(score_i) / Σ(raw_prob(j) for all j)
-```
-
-This normalization ensures we have a valid probability distribution.
-
-#### One-vs-All vs Softmax
-
-**Our approach (One-vs-All):**
-- Each score has its own independent binary model
-- Models trained separately with individual regularization
-- Raw probabilities normalized after prediction
-- Allows flexible per-score parameters
-- Efficient for 300+ classes
-
-**Alternative approach (Softmax/True Multinomial):**
-- All scores compete in a single joint model
-- Probabilities naturally sum to 1 via softmax
-- All classes trained simultaneously
-- Single set of hyperparameters for all classes
-- Computationally expensive for many classes
-
-We use one-vs-all because:
-1. Flexible regularization per score (adaptive to frequency)
-2. More stable optimization for 300+ scores
-3. Easier to debug and interpret individual score models
-4. Can handle rare scores better with adaptive penalties
-
----
-
-### Part 5: Training the Model
-
-**Training objective:** Find β coefficients that best predict historical scores while avoiding overfitting.
-
-#### Loss Function
-
-For each score's binary model:
-
-```
-Loss = -LogLikelihood + L2_Regularization
-
-Where:
-LogLikelihood = Σ[y_i × log(p_i) + (1 - y_i) × log(1 - p_i)]
-L2_Regularization = λ × Σ(β_j - β_prior_j)²
-```
-
-**Components:**
-
-- `-LogLikelihood`: How well the model fits training data (lower is better)
-- `λ`: Regularization strength (higher = more penalty for deviation)
-- `(β - β_prior)²`: Squared distance from prior coefficients
-
-#### Prior Coefficients
-
-The prior is derived from the empirical distribution:
-
-```
-β₀_prior = logit(empirical_probability)
-β₁_prior = 0  (no prior belief about spread effect)
-β₂_prior = 0  (no prior belief about total effect)
-β₃_prior = 0  (no prior belief about quadratic effects)
-β₄_prior = 0  (no prior belief about quadratic effects)
-```
-
-#### Optimization Algorithm
-
-We use L-BFGS-B (Limited-memory Broyden-Fletcher-Goldfarb-Shanno with Bounds):
-
-1. **Gradient-based optimization:** Efficiently finds coefficients that minimize loss
-2. **Bounded search:** Constrains coefficients to reasonable ranges
-3. **Fallback to Nelder-Mead:** If L-BFGS-B fails, use gradient-free method
-
-**Coefficient bounds:**
-
-```
-β₀: [prior_logit - 5, prior_logit + 5]  (intercept can vary moderately)
-β₁: [-2, +2]  (spread effect bounded)
-β₂: [-2, +2]  (total effect bounded)
-β₃: [-1, +1]  (quadratic effects smaller)
-β₄: [-1, +1]  (quadratic effects smaller)
-```
-
-#### What the Model Learns
-
-**Example learned patterns:**
-
-- **7-0 scores:** Positive β₁ coefficient (more likely when home is favored)
-- **0-7 scores:** Negative β₁ coefficient (more likely when away is favored)
-- **14-0 scores:** Larger positive β₁ (even more sensitive to spread)
-- **7-7 scores:** Near-zero β₁ (happens regardless of favorite)
-- **High-scoring ties:** Positive β₂ (more likely in high-total games)
-
----
-
-### Part 6: Feature Normalization
-
-Before regression, we normalize inputs to put them on comparable scales:
-
-```
-normalized_spread = spread / 10.0
-normalized_total = (total - 50) / 20.0
-```
-
-**Why normalize?**
-
-- **Raw spread range:** -70 to +70 (but typically -35 to +35)
-- **Raw total range:** 30 to 90 (but typically 40 to 70)
-- Without normalization, larger-magnitude features dominate
-- Normalization ensures both features contribute proportionally
+"What is the probability of each Q1 score GIVEN the pregame betting lines?"
 
 **Example:**
-
-| Feature | Raw | Normalization | Normalized |
-|---------|-----|---------------|------------|
-| Spread | -14.0 | / 10.0 | -1.40 |
-| Total | 58.0 | (x - 50) / 20.0 | +0.40 |
-| Spread² | 196.0 | (-1.40)² | 1.96 |
-| Total² | 3364.0 | (0.40)² | 0.16 |
-
-After normalization, both features typically range from -3 to +3.
+- Given spread = -7.5, total = 58.5
+- What is P(7-0)? P(7-7)? P(14-0)?
 
 ---
 
-## Regularization and Overfitting
+## Feature Engineering
 
-### The Overfitting Problem
+The key innovation is transforming correlated inputs into orthogonal (uncorrelated) features.
 
-**Scenario:** Only 5 games in history ended Q1 at 24-17.
+### Step 1: Decompose Spread and Total
 
-**Without regularization, the model might learn:**
-- "24-17 only happens when total is exactly 67.5"
-- "24-17 requires spread between -8.5 and -9.5"
-
-**Problem:** This is likely random noise, not a real pattern. With only 5 examples, we can't reliably distinguish signal from noise.
-
-**Result:** Wild, overconfident predictions that don't generalize.
-
----
-
-### The Solution: Adaptive L2 Regularization
-
-Add a penalty for coefficients that deviate from sensible priors:
+The spread and total implicitly tell us each team's expected points:
 
 ```
-Loss = -LogLikelihood + λ × Σ(β_j - β_prior_j)²
+Spread = Expected home points - Expected away points
+Total = Expected home points + Expected away points
+
+Solve for individual team expectations:
+  Favorite expected points = (Total + |Spread|) / 2
+  Underdog expected points = (Total - |Spread|) / 2
 ```
-
-**How it works:**
-
-- Pulls coefficients toward prior values (empirical baseline)
-- Stronger pull for rare scores (high λ)
-- Weaker pull for common scores (low λ)
-- Prevents overfitting while allowing data-driven adjustments
-
-### Adaptive Regularization Strength
-
-Regularization strength varies by score frequency:
-
-```
-λ(score) = base_λ × (1 + 1 / max(count(score), 5))
-```
-
-Where:
-- `base_λ = 0.1` (baseline regularization)
-- `count(score)` = number of times this score appeared
-- Minimum count of 5 prevents extreme penalties
 
 **Example:**
-
-| Score | Count | Calculation | λ Value | Strength |
-|-------|-------|-------------|---------|----------|
-| 7-0 | 765 | 0.1 × (1 + 1/765) | 0.100 | Very weak |
-| 14-14 | 45 | 0.1 × (1 + 1/45) | 0.102 | Weak |
-| 21-17 | 8 | 0.1 × (1 + 1/8) | 0.113 | Moderate |
-| 24-17 | 5 | 0.1 × (1 + 1/5) | 0.120 | Strong |
-
-### Effect of Regularization
-
-**For common scores (weak regularization):**
-- Model learns mostly from data
-- Can deviate significantly from empirical baseline
-- Captures true conditional patterns
-
-**For rare scores (strong regularization):**
-- Model stays closer to empirical baseline
-- Limited deviation based on sparse data
-- Prevents overfitting to noise
-
-**Example: 7-0 score in a heavily favored home game**
-
 ```
-Empirical: 11.0%
-Model raw: 18.5% (learns home is heavily favored)
-Regularized: 17.2% (allows adjustment but not too extreme)
+Spread = -7.5 (home favored by 7.5)
+Total = 58.5
+
+Favorite (home) expected: (58.5 + 7.5) / 2 = 33.0 points
+Underdog (away) expected: (58.5 - 7.5) / 2 = 26.0 points
 ```
 
-**Example: 24-17 score (rare)**
+### Step 2: Normalize by Typical Team Score
 
+Normalize to make features scale-invariant:
+
+```python
+typical_team_score = 27.5  # Average team score in CFB (learned from data)
+
+norm_fav = implied_fav_points / typical_team_score
+norm_dog = implied_dog_points / typical_team_score
 ```
-Empirical: 0.08%
-Model raw: 2.1% (might be noise from 5 games)
-Regularized: 0.15% (stays closer to baseline)
+
+**Example continued:**
 ```
+norm_fav = 33.0 / 27.5 = 1.200
+norm_dog = 26.0 / 27.5 = 0.945
+```
+
+### Step 3: Create Orthogonal Features
+
+Transform to orthogonal basis:
+
+```python
+feature_total = norm_fav + norm_dog   # Sum captures overall scoring level
+feature_margin = norm_fav - norm_dog  # Difference captures expected margin
+```
+
+**Example completed:**
+```
+feature_total = 1.200 + 0.945 = 2.145  (high-scoring game)
+feature_margin = 1.200 - 0.945 = 0.255  (moderate favorite)
+```
+
+### Why This Works
+
+**Mathematical property:**
+```
+Correlation(feature_total, feature_margin) ≈ 0
+```
+
+By construction, these features are uncorrelated when spread and total vary independently.
+
+**Interpretation:**
+- `feature_total`: How much scoring to expect (drives total points)
+- `feature_margin`: How lopsided the scoring will be (drives margin)
+
+**Visual intuition:**
+```
+High total, small spread     → High feature_total, low feature_margin
+High total, large spread     → High feature_total, high feature_margin  
+Low total, small spread      → Low feature_total, low feature_margin
+Low total, large spread      → Low feature_total, high feature_margin
+```
+
+The features cleanly separate "how much" from "how lopsided".
 
 ---
 
-## Market Calibration Layer
+## Two-Tier Model Architecture
 
-After the model produces predictions, we apply a calibration layer that blends model estimates with market probabilities derived from actual betting lines.
+Not all scores have enough data for reliable individual models. We use a two-tier approach:
 
-### Why Calibration?
+### Tier 1: Common Scores (≥10 occurrences)
 
-Statistical models have systematic biases:
-- May underestimate or overestimate certain scores
-- May not capture all information in betting markets
-- Markets aggregate information from many sources
-
-**Solution:** Use market data (when available) to calibrate model predictions.
-
-### Calibration Data Structure
-
-Market probabilities are stored in CSV files named `<spread>_<total>.csv`:
-
-**Example: `7.5_45.5.csv`**
-
-| Home Score | Away Score | Fair |
-|------------|------------|------|
-| 0 | 0 | 0.0821 |
-| 7 | 0 | 0.1243 |
-| 0 | 7 | 0.0532 |
-| 7 | 7 | 0.0687 |
-| 14 | 0 | 0.0821 |
-| ... | ... | ... |
-
-These represent the market's implied probability distribution for that specific spread/total combination.
-
-### 2D Interpolation
-
-Since we can't have calibration data for every possible spread/total combination, we use **inverse distance weighting (IDW)** to interpolate.
-
-**For a score at spread = -9.5, total = 52.0:**
-
-1. Find all calibration files that contain this score
-2. Calculate distance in normalized (spread, total) space
-3. Weight each calibration point by inverse of distance
-4. Compute weighted average
-
-**Distance calculation:**
+Each score gets its own logistic regression model:
 
 ```
-distance = sqrt((spread_diff / 10)² + (total_diff / 20)²)
+logit(score) = β₀ + β₁×feature_total + β₂×feature_margin
 ```
 
-**Inverse distance weighting:**
+**Coefficients have logical constraints:**
+
+| Score Type | β₁ (total) | β₂ (margin) | Logic |
+|------------|-----------|-------------|-------|
+| 0-0 | Negative | Near zero | Less likely with high scoring |
+| 7-0 (fav) | Positive | Positive | More likely with scoring + favored |
+| 14-0 (fav blowout) | Positive | Strong positive | Much more likely with large margin |
+| 7-7 (tie) | Positive | Negative | More likely with scoring, less with margin |
+| 0-7 (dog win) | Small | Negative | More likely when underdog strong |
+
+These constraints are enforced via bounded optimization.
+
+### Tier 2: Rare Scores (<10 occurrences)
+
+Scores with insufficient data are grouped into buckets:
+
+**Bucket categories:**
+
+| Bucket | Description | Example Scores |
+|--------|-------------|----------------|
+| `other_fav_blowout` | Favored team wins by 7+ | 14-0, 21-7, 28-14, 21-0 |
+| `other_fav_close` | Favored team wins by 1-6 | 10-7, 7-3, 14-10, 17-14 |
+| `other_dog_win` | Underdog team wins | 0-7, 3-10, 7-14, 0-14 |
+| `other_tie` | Tied scores | 3-3, 14-14, 17-17, 10-10 |
+
+**Bucket model prediction:**
 
 ```
-weight_i = 1 / (distance_i² + ε)
+1. Train logistic regression for entire bucket
+   P(any score in bucket) = sigmoid(β₀ + β₁×feature_total + β₂×feature_margin)
 
-calibrated_prob = Σ(weight_i × market_prob_i) / Σ(weight_i)
+2. Distribute bucket probability among scores proportionally
+   P(specific score) = P(bucket) × (empirical proportion of score in bucket)
 ```
 
-### Blending Model and Market
-
-For each score, we blend the model prediction with the interpolated market probability:
-
+**Example:**
 ```
-final_prob = α × market_prob + (1 - α) × model_prob
-```
+Bucket "other_tie" has 15 rare tied scores
+Empirical proportions: 3-3 → 40%, 14-14 → 30%, 17-17 → 20%, 10-10 → 10%
 
-**Calibration weight (α) is adaptive:**
-
-```
-α = max_α × exp(-min_distance / 2.0)
-
-Where:
-max_α = 0.7  (maximum trust in market)
-min_distance = distance to nearest calibration point with this score
+If P(other_tie bucket) = 0.05:
+  P(3-3) = 0.05 × 0.40 = 0.020 (2.0%)
+  P(14-14) = 0.05 × 0.30 = 0.015 (1.5%)
+  P(17-17) = 0.05 × 0.20 = 0.010 (1.0%)
+  P(10-10) = 0.05 × 0.10 = 0.005 (0.5%)
 ```
 
-**Effect:**
-
-- **Exact match** (distance = 0): α = 0.70 (70% market, 30% model)
-- **Distance = 1**: α = 0.42 (42% market, 58% model)
-- **Distance = 2**: α = 0.26 (26% market, 74% model)
-- **Distance = 5+**: α ≈ 0 (mostly model)
-
-### Example Calibration
-
-**Game: Spread = -7.5, Total = 58.5**
-**Score: 7-0**
-
-**Nearest calibration points:**
-
-| File | Distance | Market Prob | Weight |
-|------|----------|-------------|--------|
-| 7.5_58.5 | 0.00 | 0.135 | ∞ (exact) |
-
-Since we have an exact match:
-- α = 0.70
-- Model prob = 0.142
-- Market prob = 0.135
-- Final prob = 0.70 × 0.135 + 0.30 × 0.142 = 0.137
-
-**Game: Spread = -9.5, Total = 56.0**
-**Score: 7-7**
-
-**Nearest calibration points:**
-
-| File | Distance | Market Prob | Weight |
-|------|----------|-------------|--------|
-| 7.5_58.5 | 0.29 | 0.078 | 11.9 |
-| 10.5_54.5 | 0.17 | 0.072 | 34.6 |
-
-Interpolated market prob:
-```
-(11.9 × 0.078 + 34.6 × 0.072) / (11.9 + 34.6) = 0.074
-```
-
-Distance to nearest = 0.17, so α = 0.70 × exp(-0.17/2) ≈ 0.64
-
-Model prob = 0.081
-
-Final prob = 0.64 × 0.074 + 0.36 × 0.081 = 0.076
-
-### Calibration Pipeline
-
-```
-1. Model produces raw probabilities
-2. Normalize to sum to 1
-3. For each score:
-   a. Interpolate market probability (if available)
-   b. Calculate calibration weight based on distance
-   c. Blend model and market probabilities
-4. Normalize final distribution to sum to 1
-```
+This allows rare scores to borrow information from similar scores while maintaining individual identities.
 
 ---
 
-## Distance-Based Adjustment for Rare Scores
+## Empirical Q1 Calibration
 
-For scores that are too rare to have fitted models (occur fewer than ~10 times), we use a distance-based heuristic rather than logistic regression.
+The model automatically learns Q1 scoring rates from historical data rather than assuming fixed percentages.
 
-### The Approach
+### Q1 as Percentage of Full Game
 
-For rare scores without fitted models:
-
-1. Start with empirical probability
-2. Calculate "expected" Q1 outcome from game lines
-3. Measure how far this score is from expectations
-4. Apply exponential decay based on distance
-
-### Expected Outcome Calculation
-
-```
-expected_margin = -spread
-expected_q1_total = total × 0.25
+**Points percentage:**
+```python
+Q1_points = (Q1_home + Q1_away) / (Game_home + Game_away)
+Empirical average: 23.5%
 ```
 
-**Examples:**
+The intercept term in each model implicitly learns this ~23.5% factor.
 
-| Spread | Total | Expected Margin | Expected Q1 Total |
-|--------|-------|-----------------|-------------------|
-| -14.0 | 56.0 | +14.0 | 14.0 |
-| +7.5 | 48.0 | -7.5 | 12.0 |
-| -3.0 | 62.0 | +3.0 | 15.5 |
-
-### Distance Calculation
-
-For a score like 17-10:
-
-```
-actual_margin = 17 - 10 = 7
-actual_total = 17 + 10 = 27
-
-margin_distance = |7 - expected_margin|
-total_distance = |27 - expected_q1_total|
+**Margin percentage:**
+```python
+Q1_margin_pct = |Q1_margin| / |Game_margin|
 ```
 
-### Exponential Decay Adjustment
+This percentage varies by spread magnitude and is learned via **cubic spline interpolation**:
 
-```
-margin_factor = exp(-margin_distance / 10.0)
-total_factor = exp(-total_distance / 5.0)
+| Game Spread | Q1 Margin % | Games |
+|-------------|-------------|-------|
+| 3 | 24.1% | ~800 |
+| 7 | 23.8% | ~1200 |
+| 10 | 22.9% | ~900 |
+| 14 | 22.3% | ~700 |
+| 21 | 21.1% | ~400 |
+| 28+ | 19.8% | ~200 |
 
-adjusted_prob = empirical_prob × margin_factor × total_factor
-```
+**Pattern:** Closer games see proportionally more of the margin manifest in Q1. Blowouts spread margin more evenly across quarters.
 
-**Decay rates:**
-- Margin decays with half-life of ~7 points
-- Total decays with half-life of ~3.5 points
-
-### Example
-
-**Game: Spread = -10.5, Total = 52.0**
-**Score: 17-10 (empirical prob = 0.0012)**
-
-```
-Expected margin: +10.5
-Expected Q1 total: 13.0
-
-Actual margin: 7
-Actual total: 27
-
-Margin distance: |7 - 10.5| = 3.5
-Total distance: |27 - 13| = 14.0
-
-Margin factor: exp(-3.5 / 10) = 0.705
-Total factor: exp(-14.0 / 5) = 0.061
-
-Adjusted prob: 0.0012 × 0.705 × 0.061 = 0.000052 (0.0052%)
-```
-
-This score is far from expected total, so it gets heavily downweighted.
+The model incorporates this via a smooth interpolator rather than discrete buckets.
 
 ---
 
-## Putting It All Together
+## Training Process
 
-### The Complete Prediction Pipeline
+### Data Preparation
 
-#### Step 1: Calculate Empirical Distribution
+**1. Standardize to favored-underdog orientation:**
 
+All scores are oriented relative to the favored team for modeling:
 ```
-For each Q1 score in historical data:
-    empirical_prob[score] = count[score] / total_games
+If home favored (spread < 0):
+  favored_score = home_score
+  underdog_score = away_score
+  
+If away favored (spread > 0):
+  favored_score = away_score
+  underdog_score = home_score
 ```
 
-#### Step 2: Train Binary Models with Adaptive Regularization
+This allows the model to learn patterns like "favored team scores 14, underdog scores 0" rather than learning separate patterns for "home 14, away 0" and "home 0, away 14" when the favorite changes.
 
-```
-For each common Q1 score:
-    # Calculate regularization strength
-    λ = 0.1 × (1 + 1 / max(count(score), 5))
+**2. Compute orthogonal features for all games:**
+
+```python
+for each game:
+    abs_spread = |pregame_spread|
+    total = pregame_total
     
-    # Calculate prior
-    prior_logit = logit(empirical_prob[score])
+    implied_fav = (total + abs_spread) / 2
+    implied_dog = (total - abs_spread) / 2
     
-    # Set up loss function
-    Loss = -Σ[y × log(p) + (1-y) × log(1-p)] + λ × Σ(β - β_prior)²
+    norm_fav = implied_fav / typical_team_score
+    norm_dog = implied_dog / typical_team_score
     
-    # Optimize to find best coefficients
-    β = optimize(Loss)
-    
-    # Store trained model
-    model[score] = β
+    feature_total = norm_fav + norm_dog
+    feature_margin = norm_fav - norm_dog
 ```
 
-#### Step 3: Load Market Calibration Data
+### Model Fitting
+
+**For each common score:**
+
+Minimize regularized negative log-likelihood:
 
 ```
-For each CSV file in calibration folder:
-    # Parse filename to get spread and total
-    spread, total = parse_filename(file)
-    
-    # Load market probabilities
-    market_data[(spread, total)] = load_csv(file)
+Loss = -Σ[y×log(p) + (1-y)×log(1-p)] + Penalty
+
+where:
+  y = 1 if game had this score, 0 otherwise
+  p = sigmoid(β₀ + β₁×feature_total + β₂×feature_margin)
 ```
 
-#### Step 4: Make Predictions
+**Elastic Net regularization:**
 
-```
-Given: spread = -7.5, total = 58.5
-
-# Phase 1: Model predictions
-For each possible score:
-    If score has fitted model:
-        # Normalize inputs
-        norm_spread = spread / 10.0
-        norm_total = (total - 50) / 20.0
-        
-        # Calculate logit
-        logit = β₀ + β₁×norm_spread + β₂×norm_total 
-                + β₃×norm_spread² + β₄×norm_total²
-        
-        # Convert to probability
-        raw_prob[score] = 1 / (1 + exp(-logit))
-    
-    Else:  # Rare score without model
-        # Use distance-based heuristic
-        expected_margin = -spread
-        expected_total = total × 0.25
-        
-        margin_diff = |actual_margin - expected_margin|
-        total_diff = |actual_total - expected_total|
-        
-        margin_factor = exp(-margin_diff / 10)
-        total_factor = exp(-total_diff / 5)
-        
-        raw_prob[score] = empirical_prob[score] × margin_factor × total_factor
-
-# Phase 2: Normalize
-total = Σ raw_prob[score]
-For each score:
-    model_prob[score] = raw_prob[score] / total
-
-# Phase 3: Market calibration
-For each score:
-    # Interpolate market probability
-    market_prob = interpolate_market_data(spread, total, score)
-    
-    If market_prob exists:
-        # Calculate calibration weight based on distance
-        distance = min_distance_to_calibration_point(spread, total, score)
-        α = 0.7 × exp(-distance / 2.0)
-        
-        # Blend model and market
-        calibrated_prob[score] = α × market_prob + (1-α) × model_prob
-    Else:
-        calibrated_prob[score] = model_prob[score]
-
-# Phase 4: Final normalization
-total = Σ calibrated_prob[score]
-For each score:
-    final_prob[score] = calibrated_prob[score] / total
+```python
+α = 0.1 × (1 + 1/max(n_occurrences, 5))  # Adaptive strength
+penalty = α × [0.3×|β - β_prior| + 0.7×(β - β_prior)²]
+         = α × [L1_component + L2_component]
 ```
 
-#### Step 5: Output Distribution
+**Why Elastic Net?**
+- **L1 (Lasso):** Encourages sparse solutions, can zero out features
+- **L2 (Ridge):** Shrinks coefficients smoothly toward prior
+- **Combination:** Gets benefits of both
+
+**Prior specification:**
+
+```python
+β₀_prior = logit(empirical_frequency)
+β₁_prior = 0  # No prior belief about total effect
+β₂_prior = 0  # No prior belief about margin effect
+```
+
+**Optimization:**
+
+Uses L-BFGS-B algorithm with bounded search:
+- Intercept bounds: `[prior_logit - 5, prior_logit + 5]`
+- Coefficient bounds: Set based on score type (see logical constraints above)
+- Typical convergence: 20-50 iterations
+
+**For each rare score bucket:**
+
+Same process but:
+- Binary target: 1 if score in bucket, 0 otherwise
+- Larger sample size → more stable fit
+- Distributes probability among bucket members
+
+### Feature Selection
+
+After fitting, the model reports which features were effectively dropped:
 
 ```
-Score  | Empirical | Model    | Market   | Final   
--------|-----------|----------|----------|--------
-7-0    |   11.0%   |  14.2%   |  13.5%   | 13.7%
-7-7    |    7.6%   |   8.1%   |   7.4%   |  7.6%
-0-0    |    7.1%   |   5.8%   |   6.2%   |  6.1%
-14-0   |    6.6%   |   8.9%   |   8.2%   |  8.4%
+Feature 'total': Dropped in 15/120 models (12.5%)
+Feature 'margin': Dropped in 8/120 models (6.7%)
+```
+
+A feature is "dropped" when Elastic Net shrinks its coefficient below 0.01.
+
+---
+
+## Making Predictions
+
+### Prediction Pipeline
+
+**Given:** New game with spread = -7.5, total = 58.5
+
+**Step 1: Compute orthogonal features**
+
+```python
+abs_spread = 7.5
+implied_fav = (58.5 + 7.5) / 2 = 33.0
+implied_dog = (58.5 - 7.5) / 2 = 26.0
+
+norm_fav = 33.0 / 27.5 = 1.200
+norm_dog = 26.0 / 27.5 = 0.945
+
+feature_total = 2.145
+feature_margin = 0.255
+```
+
+**Step 2: Calculate logit for each score**
+
+For each score with a trained model:
+```python
+logit = β₀ + β₁×2.145 + β₂×0.255
+```
+
+Convert to raw probability:
+```python
+raw_prob = 1 / (1 + exp(-logit))
+```
+
+**Step 3: Handle orientation**
+
+Since models are trained in favored-underdog orientation:
+
+```python
+if home_favored:
+    P(home=7, away=0) = P_model(fav=7, dog=0)
+    P(home=0, away=7) = P_model(fav=0, dog=7)
+else:  # away favored
+    P(home=7, away=0) = P_model(fav=0, dog=7)
+    P(home=0, away=7) = P_model(fav=7, dog=0)
+```
+
+**Step 4: Normalize to valid distribution**
+
+```python
+total = Σ raw_prob(all scores)
+for each score:
+    final_prob(score) = raw_prob(score) / total
+```
+
+This ensures probabilities sum to exactly 1.
+
+### Output Format
+
+```
+Rank  Score     Probability  Percentage
+1     7-0       0.092834     9.28%
+2     7-7       0.068145     6.81%
+3     14-0      0.054287     5.43%
+4     0-0       0.041502     4.15%
+5     3-0       0.039871     3.99%
 ...
 ```
 
@@ -818,216 +446,213 @@ Score  | Empirical | Model    | Market   | Final
 
 ### Setup
 
-**Game characteristics:**
-- Spread: -10.5 (home favored by 10.5)
-- Total: 54.5
+**Game:** Alabama (-10.5) vs Auburn, Total 54.5
 
 **Historical data:**
-- 7,000 games total
-- Score 14-0 occurred 460 times (6.6%)
-- Score 7-7 occurred 528 times (7.6%)
+- Total games: 7042
+- Score 14-0 occurred 460 times (6.53%)
+- Score 7-7 occurred 528 times (7.50%)
 
-### Step 1: Empirical Probabilities
-
-```
-P(14-0) = 460 / 7000 = 0.066
-P(7-7) = 528 / 7000 = 0.076
-```
-
-### Step 2: Calculate Priors
+### Step 1: Compute Features
 
 ```
-logit_prior(14-0) = log(0.066 / 0.934) = -2.65
-logit_prior(7-7) = log(0.076 / 0.924) = -2.49
+abs_spread = 10.5
+implied_fav = (54.5 + 10.5) / 2 = 32.5
+implied_dog = (54.5 - 10.5) / 2 = 22.0
+
+norm_fav = 32.5 / 27.5 = 1.182
+norm_dog = 22.0 / 27.5 = 0.800
+
+feature_total = 1.182 + 0.800 = 1.982
+feature_margin = 1.182 - 0.800 = 0.382
 ```
 
-### Step 3: Train Models
+**Interpretation:**
+- Total of 1.982 → Moderate scoring game (typical is ~2.0)
+- Margin of 0.382 → Solid favorite (positive margin expected)
 
-**For 14-0 score:**
+### Step 2: Score 14-0 (Favored Blowout)
 
-Regularization: `λ = 0.1 × (1 + 1/460) = 0.100`
-
-After optimization:
+**Empirical probability:**
 ```
-β₀ = -2.60  (slightly higher than prior, 14-0 slightly more common than baseline)
-β₁ = +0.85  (strong positive: more likely when home is favored)
-β₂ = +0.12  (weak positive: slightly more likely in higher-scoring games)
-β₃ = -0.08  (negative quadratic: effect diminishes at extreme spreads)
-β₄ = +0.03  (small quadratic: minimal non-linear total effect)
+P(14-0) = 460 / 7042 = 0.0653
+logit_prior = log(0.0653 / 0.9347) = -2.65
 ```
 
-**For 7-7 score:**
-
-Regularization: `λ = 0.1 × (1 + 1/528) = 0.100`
-
-After optimization:
+**Trained model:**
 ```
-β₀ = -2.48  (close to prior)
-β₁ = -0.02  (near zero: happens regardless of favorite)
-β₂ = +0.31  (moderate positive: more likely in higher-scoring games)
-β₃ = -0.15  (negative quadratic: less likely at extreme spreads)
-β₄ = +0.05  (small quadratic: minimal non-linear total effect)
+β₀ = -2.60   (intercept, slightly above prior)
+β₁ = +0.83   (total effect: more likely with scoring)
+β₂ = +1.12   (margin effect: much more likely with large margin)
 ```
 
-### Step 4: Make Predictions
-
-**Normalize inputs:**
+**Calculate logit:**
 ```
-norm_spread = -10.5 / 10.0 = -1.05
-norm_total = (54.5 - 50) / 20.0 = +0.225
-norm_spread² = 1.1025
-norm_total² = 0.0506
+logit = -2.60 + 0.83×1.982 + 1.12×0.382
+      = -2.60 + 1.645 + 0.428
+      = -0.527
 ```
 
-**Calculate logits:**
+**Convert to probability:**
+```
+raw_prob = 1 / (1 + exp(0.527))
+         = 1 / 1.694
+         = 0.371 (37.1% before normalization)
+```
+
+**After normalizing all scores:**
+```
+P(14-0) = 0.089 (8.9%)
+```
+
+### Step 3: Score 7-7 (Tie)
+
+**Empirical probability:**
+```
+P(7-7) = 528 / 7042 = 0.0750
+logit_prior = log(0.0750 / 0.9250) = -2.51
+```
+
+**Trained model:**
+```
+β₀ = -2.48   (close to prior)
+β₁ = +0.31   (total effect: more likely with scoring)
+β₂ = -0.52   (margin effect: less likely with large margin)
+```
+
+**Calculate logit:**
+```
+logit = -2.48 + 0.31×1.982 + (-0.52)×0.382
+      = -2.48 + 0.614 - 0.199
+      = -2.065
+```
+
+**Convert to probability:**
+```
+raw_prob = 1 / (1 + exp(2.065))
+         = 1 / 8.88
+         = 0.113 (11.3% before normalization)
+```
+
+**After normalizing all scores:**
+```
+P(7-7) = 0.064 (6.4%)
+```
+
+### Step 4: Interpretation
+
+| Score | Empirical | Model | Change | Why |
+|-------|-----------|-------|--------|-----|
+| 14-0 | 6.53% | 8.90% | +2.37% | Large favorite makes blowout more likely |
+| 7-7 | 7.50% | 6.40% | -1.10% | Large spread makes tie less likely |
+
+**Feature effects:**
 
 For 14-0:
-```
-logit = -2.60 + 0.85×(-1.05) + 0.12×0.225 + (-0.08)×1.1025 + 0.03×0.0506
-      = -2.60 - 0.893 + 0.027 - 0.088 + 0.002
-      = -3.55
-```
+- `feature_total` (1.982) → +1.65 logit points (moderate scoring helps)
+- `feature_margin` (0.382) → +0.43 logit points (margin helps significantly)
+- **Net effect:** Probability increases substantially
 
 For 7-7:
-```
-logit = -2.48 + (-0.02)×(-1.05) + 0.31×0.225 + (-0.15)×1.1025 + 0.05×0.0506
-      = -2.48 + 0.021 + 0.070 - 0.165 + 0.003
-      = -2.55
-```
+- `feature_total` (1.982) → +0.61 logit points (scoring helps ties too)
+- `feature_margin` (0.382) → -0.20 logit points (margin hurts ties)
+- **Net effect:** Margin effect dominates, probability decreases
 
-**Convert to raw probabilities:**
-```
-raw_prob(14-0) = 1 / (1 + exp(3.55)) = 0.0275 (2.75%)
-raw_prob(7-7) = 1 / (1 + exp(2.55)) = 0.0723 (7.23%)
-```
+### Step 5: Full Distribution
 
-**After normalizing all 300+ scores:**
-```
-model_prob(14-0) = 0.089 (8.9%)
-model_prob(7-7) = 0.064 (6.4%)
-```
+Top 10 predictions for this game:
 
-### Step 5: Market Calibration
-
-**Assume calibration files:**
-- `10.5_54.5.csv` exists (exact match)
-- Contains: 14-0 → 0.082, 7-7 → 0.068
-
-**Distance = 0 (exact match), so α = 0.70**
-
-**For 14-0:**
-```
-market_prob = 0.082
-calibrated_prob = 0.70 × 0.082 + 0.30 × 0.089
-                = 0.0574 + 0.0267
-                = 0.084 (8.4%)
-```
-
-**For 7-7:**
-```
-market_prob = 0.068
-calibrated_prob = 0.70 × 0.068 + 0.30 × 0.064
-                = 0.0476 + 0.0192
-                = 0.067 (6.7%)
-```
-
-### Step 6: Final Normalization
-
-After calibrating all scores and normalizing:
-```
-final_prob(14-0) = 0.084 (8.4%)
-final_prob(7-7) = 0.067 (6.7%)
-```
-
-### Summary of Adjustments
-
-| Score | Empirical | Model | Market | Final | Change |
-|-------|-----------|-------|--------|-------|--------|
-| 14-0 | 6.6% | 8.9% | 8.2% | 8.4% | +1.8% |
-| 7-7 | 7.6% | 6.4% | 6.8% | 6.7% | -0.9% |
-
-**Why the changes?**
-
-- **14-0:** Heavy home favorite (-10.5 spread) makes blowout start more likely. Model increases probability, market confirms this adjustment.
-- **7-7:** Large spread makes balanced score less likely. Model decreases probability, market confirms this pattern.
+| Rank | Score | Probability | Interpretation |
+|------|-------|-------------|----------------|
+| 1 | 7-0 | 10.2% | Most common score, favorite scoring first |
+| 2 | 14-0 | 8.9% | Large margin increases blowout probability |
+| 3 | 7-7 | 6.4% | Moderate scoring allows tie despite margin |
+| 4 | 10-0 | 5.1% | Field goal-touchdown combo |
+| 5 | 0-0 | 4.8% | Defensive start |
+| 6 | 3-0 | 4.2% | Field goal only |
+| 7 | 14-7 | 3.9% | Both teams score, favorite ahead |
+| 8 | 0-7 | 3.1% | Underdog wins Q1 (less likely given margin) |
+| 9 | 21-0 | 2.8% | Extreme blowout start |
+| 10 | 7-3 | 2.6% | Close game despite spread |
 
 ---
 
 ## Key Takeaways
 
-### Model Architecture
+### Why Orthogonal Features?
 
-1. **Independent binary models:** Each score gets its own logistic regression
-2. **Adaptive regularization:** Rare scores stay closer to baseline
-3. **Market calibration:** Blend model with market data when available
-4. **Normalization:** Ensure valid probability distribution
+**Problem with raw features:**
+```
+spread and total are correlated → unstable coefficients
+Hard to interpret: "Does total affect this score, or is it just correlated spread?"
+```
 
-### Why This Approach Works
+**Solution with orthogonal features:**
+```
+feature_total and feature_margin are uncorrelated → stable coefficients
+Clear interpretation:
+  - feature_total controls overall scoring level
+  - feature_margin controls expected margin
+```
 
-**Flexibility:**
-- Per-score regularization adapts to data availability
-- Can incorporate market data without retraining
-- Handles 300+ scores efficiently
+### Why Two-Tier Architecture?
 
-**Robustness:**
-- Regularization prevents overfitting rare scores
-- Market calibration corrects systematic model biases
-- Distance-based fallback for scores without models
+**Common scores:** Enough data for individual models → precise predictions
+
+**Rare scores:** Not enough data for stable individual models → group into buckets
+- Borrow information from similar scores
+- Maintain individual score identities via proportional distribution
+- Avoid overfitting on sparse data
+
+### Why Elastic Net Regularization?
+
+**L1 component (30%):**
+- Performs feature selection
+- Can zero out irrelevant features
+- Creates sparse models
+
+**L2 component (70%):**
+- Smooth shrinkage toward prior
+- Prevents extreme coefficients
+- Better for correlated features (though ours aren't!)
+
+**Adaptive strength:**
+- Rare scores → strong regularization → stay near baseline
+- Common scores → weak regularization → learn from data
+
+### Model Properties
 
 **Interpretability:**
-- Each score's coefficients are interpretable
-- Can examine which features drive specific scores
-- Easy to debug individual score predictions
+- Each coefficient has clear meaning
+- Logical constraints ensure sensible predictions
+- Easy to debug individual scores
 
-### Limitations
+**Robustness:**
+- Regularization prevents overfitting
+- Bucket models handle sparse data
+- Normalization ensures valid distribution
 
-**Data dependency:**
-- Quality limited by historical data availability
-- Rare score combinations have high uncertainty
-- Market calibration only as good as market efficiency
+**Flexibility:**
+- Can add new features easily
+- Per-score customization possible
+- Extensible to other quarters
 
-**Model assumptions:**
-- Linear and quadratic effects may miss complex patterns
-- Independence assumption ignores score correlations
-- Calibration assumes market is well-informed
+### Current Limitations
 
-**Scope:**
-- Only predicts Q1 scores (not Q2, Q3, Q4)
-- Doesn't account for coaching tendencies
-- Doesn't incorporate first possession information
-- Doesn't consider weather, injuries, or other context
+**Features:**
+- No coaching tendency information
+- No first possession data
+- No weather/injuries/context
 
----
+**Model:**
+- Independence assumption (ignores score correlations)
+- Linear effects only (no interactions)
+- Only predicts Q1 (not sequential quarters)
 
-## Future Improvements
-
-### Potential Enhancements
-
-1. **Coaching tendencies:**
-   - Incorporate coach-specific patterns
-   - Model first possession decisions
-   - Account for offensive/defensive styles
-
-2. **Additional features:**
-   - Team strength ratings
-   - Recent form/momentum
-   - Weather conditions
-   - Key player availability
-
-3. **Sequential modeling:**
-   - Model Q2, Q3, Q4 probabilities
-   - Incorporate Q1 outcome into later quarter predictions
-   - Full game simulation
-
-4. **Advanced calibration:**
-   - Time-varying calibration (early week vs close to game)
-   - Book-specific calibration
-   - Ensemble multiple market sources
-
-5. **Model refinement:**
-   - Explore other basis functions beyond quadratic
-   - Test alternative regularization schemes
-   - Incorporate score correlation structure
+**Data:**
+- Limited to FBS games
+- Requires pregame betting lines
+- Historical data may not reflect current trends
 
 ---
 
@@ -1038,37 +663,38 @@ final_prob(7-7) = 0.067 (6.7%)
 | `P(A)` | Probability of event A |
 | `P(A\|B)` | Probability of A given B |
 | `log(x)` | Natural logarithm |
-| `exp(x)` | Exponential function (e^x) |
+| `exp(x)` | Exponential (e^x) |
+| `sigmoid(x)` | 1 / (1 + exp(-x)) |
+| `logit(p)` | log(p / (1-p)) |
 | `β` | Regression coefficient |
-| `λ` | Regularization strength |
+| `α` | Regularization strength |
 | `Σ` | Summation |
-| `α` | Calibration weight |
-| `ε` | Small constant (epsilon) |
+| `\|x\|` | Absolute value |
 
 ---
 
 ## Glossary
 
-**Binary Classification:** Predicting one of two outcomes (yes/no, 1/0)
+**Binary Classification:** Predicting one of two outcomes (yes/no, this score/not this score)
 
-**Calibration:** Adjusting model predictions to match observed frequencies
+**Elastic Net:** Regularization combining L1 (Lasso) and L2 (Ridge) penalties
 
-**Empirical Distribution:** Probability distribution derived from observed data
+**Empirical Distribution:** Probability distribution from observed frequencies
 
-**Feature:** Input variable used for prediction (spread, total)
+**Feature Engineering:** Transforming raw inputs into useful model features
 
-**Logit:** Log-odds, transformation of probability to unbounded scale
+**Logistic Regression:** Model for binary outcomes using logit link function
 
-**One-vs-All:** Training separate binary classifiers for each class
+**Multicollinearity:** High correlation between predictor variables causing unstable estimates
 
-**Overfitting:** Model learning noise rather than signal from training data
+**One-vs-All:** Training separate binary models for each class
 
-**Regularization:** Penalty term that prevents extreme coefficient values
+**Orthogonal:** Mathematically independent (zero correlation)
 
-**Sigmoid:** Function that maps any number to probability between 0 and 1
+**Regularization:** Penalty preventing extreme coefficient values and overfitting
 
-**Softmax:** Function that converts scores to probabilities that sum to 1
+**Sigmoid:** Function mapping any number to probability between 0 and 1
 
 ---
 
-*This methodology represents the current state of the model. As new data becomes available and techniques improve, the approach will evolve.*
+*This methodology reflects the current model implementation. Future versions may incorporate additional features, alternative architectures, or improved calibration methods.*
