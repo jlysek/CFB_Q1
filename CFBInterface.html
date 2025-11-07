@@ -3,569 +3,556 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CFB Quarter Score Predictor</title>
+    <title>CFB All Quarters Predictor</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
-            font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
-            background: #000000; 
-            color: #e5e7eb; 
-            line-height: 1.5; 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+            background: #000000;
+            color: #ffffff;
+            line-height: 1.6;
+            font-size: 14px;
         }
+        
+        /* Header */
         .header { 
-            background: #0a0a0a; 
-            border-bottom: 1px solid #1f1f1f; 
-            padding: 1.25rem 0; 
+            background: #000000;
+            border-bottom: 1px solid #1f1f1f;
+            padding: 1rem 0;
         }
         .container { max-width: 1400px; margin: 0 auto; padding: 0 1.5rem; }
         .header-content { display: flex; justify-content: space-between; align-items: center; }
         .logo h1 { 
-            color: #22c55e; 
-            font-size: 1.5rem; 
-            font-weight: 700; 
+            color: #22c55e;
+            font-size: 1.25rem;
+            font-weight: 600;
             letter-spacing: -0.025em;
         }
-        .status { font-size: 0.875rem; color: #6b7280; font-weight: 500; }
-        .main { padding: 2rem 0; }
-        .games-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; }
-        .games-section { 
-            background: #0a0a0a; 
-            border-radius: 8px; 
-            border: 1px solid #1f1f1f; 
+        .status { font-size: 0.8125rem; color: #6b7280; }
+        
+        /* Main Layout */
+        .main { padding: 1.5rem 0; }
+        .layout { display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; }
+        
+        /* Games Section */
+        .section { 
+            background: #000000;
+            border-radius: 4px;
+            border: 1px solid #262626;
         }
         .section-header { 
-            padding: 1rem 1.5rem; 
-            border-bottom: 1px solid #1f1f1f; 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center; 
+            padding: 0.875rem 1.25rem;
+            border-bottom: 1px solid #262626;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
         .section-title { 
-            font-size: 1rem; 
-            font-weight: 600; 
-            color: #f9fafb; 
-            letter-spacing: -0.025em;
+            font-size: 0.9375rem;
+            font-weight: 600;
+            color: #ffffff;
+            letter-spacing: -0.0125em;
         }
+        
+        /* Game Cards - oddsview style */
         .game-card { 
-            padding: 1.25rem 1.5rem; 
-            border-bottom: 1px solid #1f1f1f; 
-            cursor: pointer; 
-            transition: all 0.15s ease;
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid #1a1a1a;
+            cursor: pointer;
+            transition: background 0.15s ease;
+            background: #000000;
+        }
+        .game-card:hover { 
             background: #0a0a0a;
         }
-        .game-card:hover { background: #141414; }
         .game-card.selected { 
-            background: #15803d; 
-            border-left: 3px solid #22c55e; 
+            background: #15803d;
+            border-left: 3px solid #22c55e;
         }
-        .game-card:last-child { border-bottom: none; }
-        .game-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.875rem; }
-        .game-time { font-size: 0.8125rem; color: #6b7280; font-weight: 500; }
-        .conference-badge { 
-            background: #ea580c; 
-            color: #ffffff; 
-            padding: 0.1875rem 0.5rem; 
-            border-radius: 3px; 
-            font-size: 0.6875rem; 
-            font-weight: 700; 
+        .game-header { display: flex; justify-content: space-between; margin-bottom: 0.75rem; }
+        .game-time { 
+            font-size: 0.8125rem;
+            color: #9ca3af;
+            font-weight: 500;
+        }
+        .teams { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 0.75rem; }
+        .team-name { 
+            font-size: 0.9375rem;
+            font-weight: 600;
+            color: #ffffff;
+            letter-spacing: -0.0125em;
+        }
+        .bet-chip { 
+            background: #1a1a1a;
+            padding: 0.1875rem 0.5rem;
+            border-radius: 3px;
+            color: #9ca3af;
+            font-size: 0.75rem;
+            font-weight: 500;
+            border: 1px solid #262626;
+        }
+        
+        /* Period Selector */
+        .period-selector {
+            display: flex;
+            gap: 0.5rem;
+            padding: 0.875rem 1.25rem;
+            background: #000000;
+            border-bottom: 1px solid #262626;
+            overflow-x: auto;
+        }
+        .period-tab {
+            padding: 0.4375rem 0.875rem;
+            background: #0a0a0a;
+            border: 1px solid #262626;
+            border-radius: 4px;
+            color: #9ca3af;
+            cursor: pointer;
+            font-size: 0.8125rem;
+            font-weight: 600;
+            white-space: nowrap;
+            transition: all 0.2s;
+            letter-spacing: 0.0125em;
+        }
+        .period-tab:hover {
+            background: #1a1a1a;
+            color: #e5e7eb;
+            border-color: #374151;
+        }
+        .period-tab.active {
+            background: #22c55e;
+            color: #000000;
+            border-color: #22c55e;
+        }
+        
+        /* Markets Display - oddsview style */
+        .markets-content {
+            padding: 1.25rem;
+        }
+        .market-section {
+            margin-bottom: 1.75rem;
+        }
+        .market-section:last-child {
+            margin-bottom: 0;
+        }
+        .market-title {
+            font-size: 0.9375rem;
+            font-weight: 600;
+            color: #ffffff;
+            margin-bottom: 0.875rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            letter-spacing: -0.0125em;
+        }
+        .market-subtitle {
+            font-size: 0.6875rem;
+            color: #6b7280;
+            font-weight: 400;
+            text-transform: uppercase;
             letter-spacing: 0.025em;
         }
-        .teams { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 0.875rem; }
-        .team { display: flex; justify-content: space-between; align-items: center; }
-        .team-name { 
-            font-size: 1rem; 
-            font-weight: 600; 
-            color: #f9fafb;
-            letter-spacing: -0.025em;
-        }
-        .team-label { font-size: 0.6875rem; color: #6b7280; font-weight: 600; letter-spacing: 0.05em; }
-        .bet-chip { 
-            background: #1a1a1a; 
-            padding: 0.25rem 0.625rem; 
-            border-radius: 4px; 
-            color: #d1d5db; 
-            font-size: 0.8125rem;
-            font-weight: 500;
-        }
-        .game-total { 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center; 
-            padding-top: 0.875rem; 
-            border-top: 1px solid #1f1f1f; 
-            font-size: 0.8125rem; 
-        }
-        .total-info { display: flex; gap: 0.625rem; }
-        .q1-preview { 
-            background: #15803d; 
-            padding: 0.25rem 0.75rem; 
-            border-radius: 4px; 
-            border: 1px solid #22c55e; 
-            color: #f0fdf4;
-            font-weight: 600;
-            font-size: 0.8125rem;
-        }
-        .predictions-panel { 
-            background: #0a0a0a; 
-            border-radius: 8px; 
-            border: 1px solid #1f1f1f; 
-            height: fit-content; 
-        }
-        .no-selection { padding: 3rem; text-align: center; color: #4b5563; }
-        .prediction-header { padding: 1rem 1.5rem; border-bottom: 1px solid #1f1f1f; }
-        .prediction-content { padding: 1.5rem; }
-        .market-section { 
-            background: #141414; 
-            border-radius: 6px; 
-            padding: 1rem; 
-            margin-bottom: 1rem; 
-            border: 1px solid #1f1f1f;
-        }
-        .market-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; }
-        .market-item { 
-            background: #1a1a1a; 
-            padding: 0.75rem; 
-            border-radius: 4px; 
-            text-align: center; 
-            border: 1px solid #262626;
-        }
-        .market-label { font-size: 0.75rem; color: #9ca3af; font-weight: 500; }
-        .market-value { font-weight: 700; color: #22c55e; font-size: 1.125rem; }
-        .predictions-list { max-height: 600px; overflow-y: auto; }
-        .prediction-item { 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center; 
-            padding: 0.75rem 1rem; 
-            background: #141414; 
-            border-radius: 6px; 
-            margin-bottom: 0.5rem; 
-            border: 1px solid #1f1f1f;
-        }
-        .prediction-left { display: flex; align-items: center; gap: 0.875rem; }
-        .rank { 
-            width: 2rem; 
-            text-align: center; 
-            font-size: 0.8125rem; 
-            color: #6b7280; 
-            font-weight: 600;
-        }
-        .score { 
-            font-family: 'SF Mono', 'Monaco', 'Courier New', monospace; 
-            font-size: 1.125rem; 
-            font-weight: 700; 
-            color: #f9fafb; 
-        }
-        .score-details { display: flex; gap: 0.5rem; font-size: 0.6875rem; margin-top: 0.25rem; }
-        .detail-chip { 
-            background: #1a1a1a; 
-            padding: 0.125rem 0.375rem; 
-            border-radius: 3px; 
-            color: #9ca3af; 
-            font-weight: 500;
-        }
-        .probability { 
-            padding: 0.375rem 0.875rem; 
-            border-radius: 4px; 
-            font-size: 0.8125rem; 
-            font-weight: 700; 
-        }
-        .prob-high { background: #14532d; color: #22c55e; border: 1px solid #166534; }
-        .prob-med-high { background: #713f12; color: #fbbf24; border: 1px solid #92400e; }
-        .prob-med { background: #7c2d12; color: #fb923c; border: 1px solid #9a3412; }
-        .prob-low { background: #7f1d1d; color: #f87171; border: 1px solid #991b1b; }
-        .loading { text-align: center; padding: 3rem; }
-        .spinner { 
-            width: 2rem; 
-            height: 2rem; 
-            border: 2px solid #1f1f1f; 
-            border-top: 2px solid #22c55e; 
-            border-radius: 50%; 
-            animation: spin 1s linear infinite; 
-            margin: 0 auto 1rem; 
-        }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .error { 
-            background: #450a0a; 
-            border: 1px solid #7f1d1d; 
-            color: #fca5a5; 
-            padding: 1rem; 
-            border-radius: 6px; 
-            margin: 1rem; 
-        }
-        .refresh-btn { 
-            background: #1a1a1a; 
-            border: 1px solid #262626; 
-            color: #e5e7eb; 
-            padding: 0.5rem 1rem; 
-            border-radius: 4px; 
-            cursor: pointer; 
-            transition: all 0.15s ease; 
-            font-weight: 600;
-            font-size: 0.8125rem;
-        }
-        .refresh-btn:hover { background: #262626; }
-        .manual-input { 
-            background: #0a0a0a; 
-            border-radius: 8px; 
-            padding: 1.5rem; 
-            margin-bottom: 1.5rem; 
-            border: 1px solid #1f1f1f;
-        }
-        .input-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1rem; }
-        .input-group { display: flex; flex-direction: column; gap: 0.5rem; }
-        .input-label { 
-            font-size: 0.8125rem; 
-            color: #d1d5db; 
-            font-weight: 600; 
-        }
-        .input-field { 
-            background: #141414; 
-            border: 1px solid #262626; 
-            color: #f3f4f6; 
-            padding: 0.5rem 0.75rem; 
-            border-radius: 4px; 
-            font-size: 0.875rem; 
-        }
-        .input-field:focus { 
-            outline: none; 
-            border-color: #22c55e; 
-            box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.1); 
-        }
-        .predict-btn { 
-            background: #15803d; 
-            color: white; 
-            border: none; 
-            padding: 0.75rem 1.5rem; 
-            border-radius: 4px; 
-            font-weight: 700; 
-            cursor: pointer; 
-            transition: all 0.15s ease; 
-            font-size: 0.875rem;
-        }
-        .predict-btn:hover { background: #166534; }
-        .debug-info { 
-            background: #0a0a0a; 
-            border-radius: 6px; 
-            padding: 1rem; 
-            margin-bottom: 1.5rem; 
-            font-size: 0.8125rem; 
-            color: #9ca3af; 
-            border: 1px solid #1f1f1f;
-        }
-        .bankroll-section { 
-            background: #0a0a0a; 
-            border-radius: 8px; 
-            padding: 1.5rem; 
-            margin-bottom: 1.5rem; 
-            border: 1px solid #1f1f1f;
-        }
-        .bankroll-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 1rem; }
-        .kelly-output { 
-            background: #141414; 
-            padding: 1rem; 
-            border-radius: 4px; 
-            margin-top: 1rem; 
-            border: 1px solid #1f1f1f;
-        }
-        .kelly-result { font-size: 1.25rem; font-weight: 700; color: #22c55e; }
-        .lines-toggle { 
-            background: #1a1a1a; 
-            color: #e5e7eb; 
-            border: 1px solid #262626; 
-            padding: 0.5rem 1rem; 
-            border-radius: 4px; 
-            cursor: pointer; 
-            margin-top: 0.5rem; 
-            font-size: 0.8125rem; 
-            font-weight: 600;
-        }
-        .lines-toggle:hover { background: #262626; }
-        .lines-dropdown { 
-            background: #141414; 
-            border-radius: 4px; 
-            padding: 1rem; 
-            margin-top: 0.5rem; 
-            display: none; 
-            border: 1px solid #1f1f1f;
-        }
-        .lines-dropdown.show { display: block; }
-        .lines-table { width: 100%; border-collapse: collapse; }
-        .lines-table th { 
-            text-align: left; 
-            padding: 0.5rem; 
-            border-bottom: 1px solid #262626; 
-            color: #9ca3af; 
-            font-size: 0.8125rem; 
-            font-weight: 600;
-        }
-        .lines-table td { 
-            padding: 0.5rem; 
-            border-bottom: 1px solid #1f1f1f; 
-            font-size: 0.8125rem; 
-        }
-        .spread-market { 
-            background: #141414; 
-            padding: 1rem; 
-            border-radius: 4px; 
-            margin-bottom: 0.5rem; 
-            border: 1px solid #1f1f1f;
-        }
-        .spread-line { 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center; 
-            padding: 0.625rem 0.75rem; 
-            background: #1a1a1a; 
-            border-radius: 4px; 
-            margin-bottom: 0.375rem; 
-            font-size: 0.8125rem; 
-            border: 1px solid #262626;
-        }
-        .total-market { 
-            background: #141414; 
-            padding: 1rem; 
-            border-radius: 4px; 
-            margin-bottom: 0.5rem; 
-            border: 1px solid #1f1f1f;
-        }
-        .total-line { 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center; 
-            padding: 0.625rem 0.75rem; 
-            background: #1a1a1a; 
-            border-radius: 4px; 
-            margin-bottom: 0.375rem; 
-            font-size: 0.8125rem; 
-            border: 1px solid #262626;
-        }
-        .parlay-builder {
-            background: #0a0a0a;
-            border-radius: 8px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-            border: 1px solid #1f1f1f;
-        }
-        .bet-grid {
+        
+        /* Market Lines - oddsview table style */
+        .market-line {
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 0.5rem;
-            margin-bottom: 1rem;
+            grid-template-columns: 60px 1fr 1fr;
+            gap: 0.625rem;
+            align-items: stretch;
+            margin-bottom: 0.5rem;
         }
-        .bet-option {
-            background: #141414;
-            border: 2px solid #262626;
-            padding: 0.75rem;
-            border-radius: 4px;
+        .line-label {
+            font-size: 0.875rem;
+            color: #ffffff;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            padding-left: 0.25rem;
+        }
+        .market-option {
+            padding: 0.625rem 0.75rem;
+            background: #0a0a0a;
+            border: 1px solid #1a1a1a;
+            border-radius: 3px;
             cursor: pointer;
-            transition: all 0.15s ease;
-            text-align: center;
+            transition: all 0.15s;
         }
-        .bet-option:hover {
-            background: #1a1a1a;
-            border-color: #404040;
+        .market-option:hover {
+            background: #141414;
+            border-color: #262626;
         }
-        .bet-option.selected {
+        .market-option.selected {
             background: #15803d;
             border-color: #22c55e;
         }
-        .bet-option .team-name {
+        .market-option .team {
+            font-size: 0.8125rem;
             font-weight: 600;
-            font-size: 0.875rem;
+            color: #ffffff;
             margin-bottom: 0.25rem;
+            letter-spacing: -0.0125em;
         }
-        .bet-option .line {
+        .market-option .prob {
+            font-size: 0.875rem;
+            color: #22c55e;
+            font-weight: 600;
+        }
+        .market-option .odds {
             font-size: 0.75rem;
-            color: #9ca3af;
+            color: #6b7280;
+            margin-top: 0.125rem;
         }
-        .parlay-summary {
-            background: #141414;
-            padding: 1rem;
+        
+        /* Moneyline Grid */
+        .moneyline-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.625rem;
+        }
+        .moneyline-3way {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.625rem;
+        }
+        
+        /* SGP Builder */
+        .sgp-builder {
+            background: #0a0a0a;
+            border: 1px solid #1a1a1a;
             border-radius: 4px;
-            border: 1px solid #1f1f1f;
-            margin-top: 1rem;
+            padding: 1.25rem;
+            margin-bottom: 1.75rem;
         }
-        .parlay-odds {
-            font-size: 1.5rem;
+        .sgp-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #ffffff;
+            margin-bottom: 0.875rem;
+            letter-spacing: -0.0125em;
+        }
+        .sgp-selections {
+            margin-bottom: 0.875rem;
+        }
+        .sgp-selection {
+            background: #141414;
+            padding: 0.625rem 0.75rem;
+            border-radius: 3px;
+            margin-bottom: 0.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border: 1px solid #1a1a1a;
+        }
+        .sgp-selection-text {
+            font-size: 0.8125rem;
+            color: #e5e7eb;
+            font-weight: 500;
+        }
+        .sgp-period-badge {
+            background: #1a1a1a;
+            padding: 0.125rem 0.4375rem;
+            border-radius: 3px;
+            font-size: 0.6875rem;
+            color: #9ca3af;
+            margin-right: 0.5rem;
+            font-weight: 600;
+            border: 1px solid #262626;
+        }
+        .remove-btn {
+            background: #7f1d1d;
+            color: white;
+            border: none;
+            padding: 0.25rem 0.625rem;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 0.6875rem;
+            font-weight: 600;
+            transition: background 0.15s;
+        }
+        .remove-btn:hover {
+            background: #991b1b;
+        }
+        .sgp-result {
+            background: #141414;
+            border-radius: 4px;
+            padding: 0.875rem;
+            border: 1px solid #1a1a1a;
+        }
+        .sgp-stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.875rem;
+            text-align: center;
+        }
+        .sgp-stat-label {
+            font-size: 0.6875rem;
+            color: #9ca3af;
+            margin-bottom: 0.25rem;
+            text-transform: uppercase;
+            letter-spacing: 0.025em;
+        }
+        .sgp-stat-value {
+            font-size: 1.375rem;
             font-weight: 700;
             color: #22c55e;
         }
-        h3, h4 { 
-            color: #f9fafb; 
-            letter-spacing: -0.025em;
+        
+        /* Manual Input */
+        .manual-input {
+            background: #000000;
+            border: 1px solid #262626;
+            border-radius: 4px;
+            padding: 1.25rem;
+            margin-top: 1.5rem;
         }
-        small { font-size: 0.75rem; }
+        .input-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.875rem;
+            margin-bottom: 0.875rem;
+        }
+        .input-group {
+            display: flex;
+            flex-direction: column;
+        }
+        .input-label {
+            font-size: 0.8125rem;
+            color: #9ca3af;
+            margin-bottom: 0.375rem;
+            font-weight: 500;
+        }
+        input {
+            background: #0a0a0a;
+            border: 1px solid #262626;
+            border-radius: 4px;
+            padding: 0.625rem 0.75rem;
+            color: #ffffff;
+            font-size: 0.875rem;
+        }
+        input:focus {
+            outline: none;
+            border-color: #22c55e;
+        }
+        button {
+            background: #22c55e;
+            color: #000000;
+            border: none;
+            padding: 0.625rem 1.25rem;
+            border-radius: 4px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        button:hover {
+            background: #16a34a;
+        }
+        
+        /* Loading & Error States */
+        .loading {
+            text-align: center;
+            padding: 3rem;
+            color: #9ca3af;
+        }
+        .spinner {
+            border: 3px solid #1a1a1a;
+            border-top: 3px solid #22c55e;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error {
+            background: #7f1d1d;
+            color: #fecaca;
+            padding: 0.875rem;
+            border-radius: 4px;
+            margin: 1rem;
+            border: 1px solid #991b1b;
+        }
+        .no-selection {
+            text-align: center;
+            padding: 3rem;
+            color: #6b7280;
+        }
+        
+        /* Top Scores */
+        .top-scores {
+            background: #0a0a0a;
+            border-radius: 4px;
+            padding: 0.875rem;
+            margin-bottom: 1.25rem;
+            border: 1px solid #1a1a1a;
+        }
+        .score-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.4375rem 0;
+            border-bottom: 1px solid #1a1a1a;
+        }
+        .score-item:last-child {
+            border-bottom: none;
+        }
+        .score-label {
+            font-size: 0.875rem;
+            color: #e5e7eb;
+            font-weight: 500;
+        }
+        .score-prob {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: #22c55e;
+        }
     </style>
 </head>
 <body>
     <div class="header">
         <div class="container">
             <div class="header-content">
-                <div class="logo"><h1>CFB Quarter Predictor</h1></div>
-                <div class="status"><span id="status">Q1 Score Predictions</span></div>
+                <div class="logo">
+                    <h1>CFB All Quarters</h1>
+                </div>
+                <div class="status" id="status">Loading...</div>
             </div>
         </div>
     </div>
+
     <div class="main">
         <div class="container">
-            <div class="debug-info" id="debug-info">Calculating current season and week...</div>
-            
-            <div class="bankroll-section">
-                <h3 style="margin-bottom: 1rem;">Bankroll & Kelly Criterion Calculator</h3>
-                <div class="bankroll-grid">
-                    <div class="input-group">
-                        <label class="input-label">Current Bankroll</label>
-                        <input type="number" id="bankroll" class="input-field" placeholder="e.g., 10000" value="10000" step="100">
-                    </div>
-                    <div class="input-group">
-                        <label class="input-label">Fair Probability (%)</label>
-                        <input type="number" id="fairProb" class="input-field" placeholder="e.g., 55" min="0" max="100" step="0.1">
-                    </div>
-                    <div class="input-group">
-                        <label class="input-label">Offered Odds (American)</label>
-                        <input type="number" id="offeredOdds" class="input-field" placeholder="e.g., -110">
-                    </div>
-                </div>
-                <div class="bankroll-grid">
-                    <div class="input-group">
-                        <label class="input-label">Kelly Multiplier (%)</label>
-                        <input type="number" id="kellyMultiplier" class="input-field" value="25" min="1" max="100" step="1">
-                    </div>
-                </div>
-                <button class="predict-btn" onclick="calculateKelly()">Calculate Bet Size</button>
-                <div class="kelly-output" id="kellyOutput" style="display: none;">
-                    <div style="margin-bottom: 0.5rem;"><strong>Kelly Bet Size:</strong> <span class="kelly-result" id="kellyAmount">0</span></div>
-                    <div style="font-size: 0.875rem; color: #6b7280;">
-                        <div>Expected Value: <span id="expectedValue">0%</span></div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="manual-input">
-                <h3 style="margin-bottom: 1rem;">Manual Prediction</h3>
-                <div class="input-grid">
-                    <div class="input-group"><label class="input-label">Home Team</label><input type="text" id="homeTeam" class="input-field" placeholder="e.g., Georgia" value="Georgia"></div>
-                    <div class="input-group"><label class="input-label">Away Team</label><input type="text" id="awayTeam" class="input-field" placeholder="e.g., Alabama" value="Alabama"></div>
-                    <div class="input-group"><label class="input-label">Spread (negative = home favored)</label><input type="number" id="spread" class="input-field" placeholder="e.g., -3.5" value="-3.5" step="0.5"></div>
-                    <div class="input-group"><label class="input-label">Total</label><input type="number" id="total" class="input-field" placeholder="e.g., 58.5" value="58.5" step="0.5"></div>
-                </div>
-                <button class="predict-btn" onclick="generateManualPrediction()">Generate Predictions</button>
-            </div>
-            <div class="games-grid">
-                <div class="games-section">
+            <div class="layout">
+                <!-- Games List -->
+                <div class="section">
                     <div class="section-header">
-                        <h2 class="section-title" id="games-title">Current Week Games</h2>
-                        <button class="refresh-btn" onclick="loadGames()">Refresh</button>
+                        <span class="section-title" id="games-title">Upcoming Games</span>
+                        <button onclick="loadGames()" style="padding: 0.5rem 1rem; font-size: 0.75rem;">Refresh</button>
                     </div>
-                    <div id="games-list"><div class="loading"><div class="spinner"></div><p>Loading games from CFBD API...</p></div></div>
+                    <div id="games-list" class="loading">
+                        <div class="spinner"></div>
+                        <p>Loading games...</p>
+                    </div>
                 </div>
-                <div class="predictions-panel">
-                    <div class="prediction-header"><h3 class="section-title">Q1 Score Predictions</h3></div>
-                    <div id="predictions-content"><div class="no-selection"><p>Select a game or use manual input to view predictions</p></div></div>
+
+                <!-- Markets Display -->
+                <div class="section">
+                    <div class="section-header">
+                        <span class="section-title">Markets & Predictions</span>
+                    </div>
+                    
+                    <!-- SGP Builder -->
+                    <div id="sgp-section" style="display: none; padding: 1.5rem;">
+                        <div class="sgp-builder">
+                            <div class="sgp-title">SGP Builder</div>
+                            <div id="sgp-selections" class="sgp-selections">
+                                <div style="color: #6b7280; text-align: center;">Select markets below to build parlay</div>
+                            </div>
+                            <div id="sgp-result" style="display: none;">
+                                <div class="sgp-result">
+                                    <div class="sgp-stats">
+                                        <div>
+                                            <div class="sgp-stat-label">Probability</div>
+                                            <div class="sgp-stat-value" id="sgp-prob">0%</div>
+                                        </div>
+                                        <div>
+                                            <div class="sgp-stat-label">Fair Odds</div>
+                                            <div class="sgp-stat-value" id="sgp-odds">+0</div>
+                                        </div>
+                                        <div>
+                                            <div class="sgp-stat-label">Decimal</div>
+                                            <div class="sgp-stat-value" id="sgp-decimal">0.00</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Period Selector -->
+                    <div id="period-selector" style="display: none;" class="period-selector">
+                        <div class="period-tab active" onclick="switchPeriod('q1')">Q1</div>
+                        <div class="period-tab" onclick="switchPeriod('q2')">Q2</div>
+                        <div class="period-tab" onclick="switchPeriod('q3')">Q3</div>
+                        <div class="period-tab" onclick="switchPeriod('q4')">Q4</div>
+                        <div class="period-tab" onclick="switchPeriod('h1')">1st Half</div>
+                        <div class="period-tab" onclick="switchPeriod('h2')">2nd Half</div>
+                        <div class="period-tab" onclick="switchPeriod('full')">Full Game</div>
+                    </div>
+                    
+                    <!-- Markets Content -->
+                    <div id="markets-content" class="no-selection">
+                        <p>Select a game to view markets</p>
+                    </div>
                 </div>
+            </div>
+
+            <!-- Manual Input -->
+            <div class="manual-input">
+                <h3 style="margin-bottom: 1rem; color: #f9fafb;">Manual Prediction</h3>
+                <div class="input-grid">
+                    <div class="input-group">
+                        <label class="input-label">Home Team</label>
+                        <input type="text" id="homeTeam" placeholder="Georgia">
+                    </div>
+                    <div class="input-group">
+                        <label class="input-label">Away Team</label>
+                        <input type="text" id="awayTeam" placeholder="Alabama">
+                    </div>
+                    <div class="input-group">
+                        <label class="input-label">Spread (negative = home favored)</label>
+                        <input type="number" id="spread" step="0.5" placeholder="-3.5">
+                    </div>
+                    <div class="input-group">
+                        <label class="input-label">Total</label>
+                        <input type="number" id="total" step="0.5" placeholder="58.5">
+                    </div>
+                </div>
+                <button onclick="generateManualPrediction()" style="width: 100%;">Generate Predictions</button>
             </div>
         </div>
     </div>
+
     <script>
         let currentGames = [];
         let selectedGame = null;
+        let currentData = null;
+        let currentPeriod = 'q1';
         let parlaySelections = [];
-        let currentGameData = null;
-    
-        function calculateKelly() {
-            const bankroll = parseFloat(document.getElementById('bankroll').value);
-            const fairProb = parseFloat(document.getElementById('fairProb').value) / 100;
-            const offeredOdds = parseFloat(document.getElementById('offeredOdds').value);
-            const kellyMultiplier = parseFloat(document.getElementById('kellyMultiplier').value) / 100;
-            if (isNaN(bankroll) || isNaN(fairProb) || isNaN(offeredOdds) || isNaN(kellyMultiplier)) {
-                alert('Please fill in all fields');
-                return;
-            }
-            let decimalOdds;
-            if (offeredOdds > 0) {
-                decimalOdds = (offeredOdds / 100) + 1;
-            } else {
-                decimalOdds = (100 / Math.abs(offeredOdds)) + 1;
-            }
-            const b = decimalOdds - 1;
-            const p = fairProb;
-            const q = 1 - p;
-            const kellyFraction = (b * p - q) / b;
-            const fractionalKelly = kellyFraction * kellyMultiplier;
-            const betSize = bankroll * fractionalKelly;
-            const roundedBetSize = Math.round(betSize / 5) * 5;
-            const ev = (p * (decimalOdds - 1) - (1 - p)) * 100;
-            document.getElementById('kellyOutput').style.display = 'block';
-            document.getElementById('kellyAmount').textContent = `$${Math.max(0, roundedBetSize).toFixed(0)}`;
-            document.getElementById('expectedValue').textContent = `${ev.toFixed(2)}%`;
-            if (kellyFraction <= 0) {
-                document.getElementById('kellyAmount').style.color = '#ef4444';
-                document.getElementById('expectedValue').style.color = '#ef4444';
-                document.getElementById('kellyAmount').textContent = 'No Edge - Do Not Bet';
-            } else {
-                document.getElementById('kellyAmount').style.color = '#22c55e';
-                document.getElementById('expectedValue').style.color = '#22c55e';
-            }
-        }
-    
-        function toggleLines(index, event) {
-            if (event) event.stopPropagation();
-            const dropdown = document.getElementById(`lines-${index}`);
-            const game = currentGames[index];
-            if (dropdown.classList.contains('show')) {
-                dropdown.classList.remove('show');
-                return;
-            }
-            if (game.allLines && game.allLines.length > 0) {
-                let tableHTML = '<table class="lines-table"><thead><tr><th>Book</th><th>Spread</th><th>Total</th></tr></thead><tbody>';
-                game.allLines.forEach(line => {
-                    tableHTML += `<tr><td>${line.provider}</td><td>${line.spread !== null ? line.spread : 'N/A'}</td><td>${line.overUnder !== null ? line.overUnder : 'N/A'}</td></tr>`;
-                });
-                tableHTML += '</tbody></table>';
-                tableHTML += `<div style="margin-top: 0.5rem; font-size: 0.875rem; color: #6b7280;">Median Spread: ${game.spread} | Median Total: ${game.total}</div>`;
-                dropdown.innerHTML = tableHTML;
-            } else {
-                dropdown.innerHTML = '<div style="color: #6b7280; font-size: 0.875rem;">No detailed lines available</div>';
-            }
-            dropdown.classList.add('show');
-        }
-    
+
         function getCurrentSeason() {
             const today = new Date();
             const currentYear = today.getFullYear();
             const month = today.getMonth();
             return month >= 7 ? currentYear : currentYear - 1;
         }
-    
+
         function getUpcomingGamesDateRange() {
             const today = new Date();
             const startDate = new Date(today);
             const endDate = new Date(today);
             const daysUntilSunday = (7 - today.getDay()) % 7 || 7;
             endDate.setDate(today.getDate() + daysUntilSunday);
-            endDate.setHours(3 + 8, 0, 0, 0);
+            endDate.setHours(23, 59, 59, 999);
             return { startDate: startDate.toISOString(), endDate: endDate.toISOString() };
         }
-    
+
         function updateStatus() {
             const season = getCurrentSeason();
-            const { startDate, endDate } = getUpcomingGamesDateRange();
-            const start = new Date(startDate);
-            const end = new Date(endDate);
-            document.getElementById('status').textContent = `Q1 Score Predictions - ${season} Season`;
-            document.getElementById('games-title').textContent = `Upcoming Games (${start.toLocaleDateString()} - ${end.toLocaleDateString()})`;
+            document.getElementById('status').textContent = `All Quarters Predictions - ${season} Season`;
         }
-    
+
         async function loadGames() {
             const gamesList = document.getElementById('games-list');
             gamesList.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading games...</p></div>';
+            
             try {
                 const season = getCurrentSeason();
                 const { startDate, endDate } = getUpcomingGamesDateRange();
                 
                 const gamesResponse = await fetch(`/api/cfbd/games?year=${season}&seasonType=regular`);
-                
                 if (!gamesResponse.ok) throw new Error(`Games API error: ${gamesResponse.status}`);
                 const allGamesData = await gamesResponse.json();
                 
@@ -581,37 +568,35 @@
                     .filter(game => game.homeClassification === 'fbs' || game.awayClassification === 'fbs')
                     .map(game => {
                         const gameLinesArray = linesData.filter(line => line.id === game.id);
-                        let medianSpread = null, medianTotal = null, provider = null, allLines = [];
+                        let medianSpread = null, medianTotal = null;
+                        
                         for (const lineGroup of gameLinesArray) {
                             if (lineGroup.lines && lineGroup.lines.length > 0) {
                                 const spreads = [], totals = [];
                                 for (const line of lineGroup.lines) {
-                                    allLines.push(line);
-                                    if (line.spread !== null && line.spread !== undefined) spreads.push(line.spread);
-                                    if (line.overUnder !== null && line.overUnder !== undefined) totals.push(line.overUnder);
+                                    if (line.spread !== null) spreads.push(line.spread);
+                                    if (line.overUnder !== null) totals.push(line.overUnder);
                                 }
                                 if (spreads.length > 0) {
                                     spreads.sort((a, b) => a - b);
-                                    const midIndex = Math.floor(spreads.length / 2);
-                                    medianSpread = spreads.length % 2 === 0 ? (spreads[midIndex - 1] + spreads[midIndex]) / 2 : spreads[midIndex];
+                                    medianSpread = spreads[Math.floor(spreads.length / 2)];
                                 }
                                 if (totals.length > 0) {
                                     totals.sort((a, b) => a - b);
-                                    const midIndex = Math.floor(totals.length / 2);
-                                    medianTotal = totals.length % 2 === 0 ? (totals[midIndex - 1] + totals[midIndex]) / 2 : totals[midIndex];
+                                    medianTotal = totals[Math.floor(totals.length / 2)];
                                 }
-                                provider = spreads.length > 0 ? `Median of ${spreads.length} books` : null;
                                 break;
                             }
                         }
-                        return { ...game, spread: medianSpread, total: medianTotal, provider, allLines };
+                        return { ...game, spread: medianSpread, total: medianTotal };
                     })
                     .filter(game => game.spread !== null && game.total !== null)
                     .sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
+                
                 currentGames = processedGames;
                 displayGames(processedGames);
             } catch (error) {
-                gamesList.innerHTML = `<div class="error">Error: ${error.message}<br>Make sure Flask server is running</div>`;
+                gamesList.innerHTML = `<div class="error">Error: ${error.message}</div>`;
             }
         }
 
@@ -621,51 +606,48 @@
                 gamesList.innerHTML = '<div class="no-selection"><p>No games with betting lines found</p></div>';
                 return;
             }
+            
             gamesList.innerHTML = games.map((game, index) => `
                 <div class="game-card" onclick="selectGame(${index})">
                     <div class="game-header">
                         <div class="game-time">${formatGameTime(game.startDate)}</div>
-                        ${game.conferenceGame ? '<span class="conference-badge">CONF</span>' : ''}
                     </div>
                     <div class="teams">
-                        <div class="team">
-                            <div><div class="team-name">${game.awayTeam}</div><div class="team-label">AWAY</div></div>
-                            <span class="bet-chip">Spread: ${formatSpread(game.spread, 'away')}</span>
+                        <div>
+                            <div class="team-name">${game.awayTeam}</div>
+                            <span class="bet-chip">Away</span>
                         </div>
-                        <div class="team">
-                            <div><div class="team-name">${game.homeTeam}</div><div class="team-label">HOME</div></div>
-                            <span class="bet-chip">Spread: ${formatSpread(game.spread, 'home')}</span>
+                        <div>
+                            <div class="team-name">${game.homeTeam}</div>
+                            <span class="bet-chip">Home</span>
                         </div>
                     </div>
-                    <div class="game-total">
-                        <div class="total-info">
-                            <span class="bet-chip">Total: ${game.total}</span>
-                            ${game.provider ? `<span class="bet-chip">${game.provider}</span>` : ''}
-                        </div>
-                        <div class="q1-preview">Q1 predictions</div>
+                    <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                        <span class="bet-chip">Spread: ${game.spread}</span>
+                        <span class="bet-chip">Total: ${game.total}</span>
                     </div>
-                    <button class="lines-toggle" onclick="toggleLines(${index}, event)">See All Lines</button>
-                    <div class="lines-dropdown" id="lines-${index}"></div>
                 </div>
             `).join('');
         }
 
         function formatGameTime(dateString) {
             const date = new Date(dateString);
-            return date.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/Chicago' }) + ' ' +
-                   date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago' }) + ' CT';
-        }
-
-        function formatSpread(spread, team) {
-            if (spread === 0) return "PK";
-            return team === 'home' ? (spread > 0 ? `+${spread}` : spread.toString()) : 
-                   (spread > 0 ? (-spread).toString() : `+${Math.abs(spread)}`);
+            return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) + ' ' +
+                   date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
         }
 
         async function selectGame(index) {
             selectedGame = currentGames[index];
-            document.querySelectorAll('.game-card').forEach((card, i) => card.classList.toggle('selected', i === index));
-            await generatePredictions(selectedGame.spread, selectedGame.total, selectedGame.homeTeam, selectedGame.awayTeam);
+            document.querySelectorAll('.game-card').forEach((card, i) => 
+                card.classList.toggle('selected', i === index)
+            );
+            
+            await generatePredictions(
+                selectedGame.spread,
+                selectedGame.total,
+                selectedGame.homeTeam,
+                selectedGame.awayTeam
+            );
         }
 
         async function generateManualPrediction() {
@@ -673,226 +655,310 @@
             const awayTeam = document.getElementById('awayTeam').value;
             const spread = parseFloat(document.getElementById('spread').value);
             const total = parseFloat(document.getElementById('total').value);
+            
             if (!homeTeam || !awayTeam || isNaN(spread) || isNaN(total)) {
                 alert('Please fill in all fields');
                 return;
             }
+            
             await generatePredictions(spread, total, homeTeam, awayTeam);
         }
 
         async function generatePredictions(spread, total, homeTeam, awayTeam) {
-            const predictionsContent = document.getElementById('predictions-content');
-            predictionsContent.innerHTML = '<div class="loading"><div class="spinner"></div><p>Generating...</p></div>';
+            const marketsContent = document.getElementById('markets-content');
+            marketsContent.innerHTML = '<div class="loading"><div class="spinner"></div><p>Generating...</p></div>';
+            
+            document.getElementById('period-selector').style.display = 'none';
+            document.getElementById('sgp-section').style.display = 'none';
+            
             try {
-                const response = await fetch('/api/predict-quarter-scores', {
+                const response = await fetch('/api/predict-all-quarters', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ spread, total, homeTeam, awayTeam })
                 });
+                
                 if (response.ok) {
                     const data = await response.json();
-                    displayPredictions(data, homeTeam, awayTeam, spread, total);
+                    currentData = data;
+                    currentPeriod = 'q1';
+                    parlaySelections = [];
+                    
+                    document.getElementById('period-selector').style.display = 'flex';
+                    document.getElementById('sgp-section').style.display = 'block';
+                    
+                    displayMarketsForPeriod(currentPeriod);
                 } else {
                     throw new Error(`API error: ${response.status}`);
                 }
             } catch (error) {
-                predictionsContent.innerHTML = `<div class="error">Error: ${error.message}<br>Ensure Flask server is running on localhost:5000</div>`;
+                marketsContent.innerHTML = `<div class="error">Error: ${error.message}</div>`;
             }
         }
 
-
-        function probabilityToAmericanOdds(prob) {
-            if (prob <= 0 || prob >= 1) return 'N/A';
-            if (prob >= 0.5) {
-                return (-(100 * prob / (1 - prob))).toFixed(0);
-            } else {
-                return '+' + ((100 * (1 - prob) / prob)).toFixed(0);
-            }
+        function switchPeriod(period) {
+            currentPeriod = period;
+            
+            document.querySelectorAll('.period-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            displayMarketsForPeriod(period);
         }
 
-        
-        function displayPredictions(data, homeTeam, awayTeam, gameSpread, gameTotal) {
-            const predictionsContent = document.getElementById('predictions-content');
-            const predictions = data.predictions;
-            const markets = data.markets;
+        function displayMarketsForPeriod(period) {
+            if (!currentData) return;
             
-            const ml2way = markets.moneyline_2way;
-            const spreadMarkets = markets.spread;
-            const totalMarkets = markets.total;
-            currentGameData = {spread: gameSpread, total: gameTotal, homeTeam: homeTeam, awayTeam: awayTeam};
-            parlaySelections = [];
-            // Format spread markets for display
-            const spreadLines = Object.keys(spreadMarkets).map(line => {
-                const lineNum = parseFloat(line);
-                const displayLine = -lineNum;
-                return {
-                    line: displayLine,
-                    favoriteProb: spreadMarkets[line].home_cover,
-                    underdogProb: spreadMarkets[line].away_cover,
-                    favoriteOdds: spreadMarkets[line].home_odds,
-                    underdogOdds: spreadMarkets[line].away_odds
-                };
-            }).sort((a, b) => a.line - b.line);
+            console.log('=== DISPLAY MARKETS DEBUG ===');
+            console.log('Period:', period);
+            console.log('Current data structure:', currentData);
+            console.log('Markets available:', Object.keys(currentData.markets || {}));
             
-            // Format total markets for display
-            const totalLines = Object.keys(totalMarkets).map(line => ({
-                line: parseFloat(line),
-                overProb: totalMarkets[line].over,
-                underProb: totalMarkets[line].under,
-                overOdds: totalMarkets[line].over_odds,
-                underOdds: totalMarkets[line].under_odds
-            })).sort((a, b) => a.line - b.line);
+            const markets = currentData.markets[period];
+            const predictions = currentData.predictions[period];
+            const gameInfo = currentData.game_info;
             
-            predictionsContent.innerHTML = `
-                <div class="parlay-builder">
-                    <h4 style="margin-bottom: 1rem;">SGP Builder</h4>
-                    <div id="parlay-selections" style="margin-bottom: 1rem;">
-                        <div style="color: #6b7280; text-align: center;">Select bets below to build a parlay</div>
-                    </div>
-                    <div id="parlay-result" style="display: none;">
-                        <div class="parlay-summary">
-                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; text-align: center;">
-                                <div>
-                                    <div style="font-size: 0.75rem; color: #9ca3af;">Probability</div>
-                                    <div class="parlay-odds" id="parlay-prob">0%</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 0.75rem; color: #9ca3af;">Fair Odds</div>
-                                    <div class="parlay-odds" id="parlay-odds">+0</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 0.75rem; color: #9ca3af;">Decimal</div>
-                                    <div class="parlay-odds" id="parlay-decimal">0.00</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="prediction-content">
-                    <h4 style="margin-bottom: 1rem;">1st Quarter Spread</h4>
-                    <div class="spread-market">
-                        ${spreadLines.map(sm => `
-                            <div class="spread-line" style="display: grid; grid-template-columns: auto 1fr 1fr; gap: 1rem; align-items: center;">
-                                <span>Line ${sm.line >= 0 ? '+' : ''}${sm.line.toFixed(1)}</span>
-                                <div onclick="toggleBetSelection('spread', 'home', ${sm.line}, '${homeTeam} ${sm.line >= 0 ? '+' : ''}${sm.line.toFixed(1)}')" style="cursor: pointer; padding: 0.5rem; background: #1a1a1a; border-radius: 4px; text-align: center; border: 2px solid #262626;">
-                                    <span style="color: #22c55e;">${homeTeam} ${(sm.favoriteProb * 100).toFixed(1)}% (${sm.favoriteOdds >= 0 ? '+' : ''}${sm.favoriteOdds})</span>
-                                </div>
-                                <div onclick="toggleBetSelection('spread', 'away', ${sm.line}, '${awayTeam} ${sm.line <= 0 ? '+' : ''}${(-sm.line).toFixed(1)}')" style="cursor: pointer; padding: 0.5rem; background: #1a1a1a; border-radius: 4px; text-align: center; border: 2px solid #262626;">
-                                    <span style="color: #f87171;">${awayTeam} ${(sm.underdogProb * 100).toFixed(1)}% (${sm.underdogOdds >= 0 ? '+' : ''}${sm.underdogOdds})</span>
-                                </div>
-                            </div>
-                        `).join('')}
-                    </div>
-                    
-                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem;">1st Quarter Total</h4>
-                    <div class="total-market">
-                        ${totalLines.map(tm => `
-                            <div class="total-line" style="display: grid; grid-template-columns: auto 1fr 1fr; gap: 1rem; align-items: center;">
-                                <span>Line ${tm.line.toFixed(1)}</span>
-                                <div onclick="toggleBetSelection('total', 'over', ${tm.line}, 'Over ${tm.line.toFixed(1)}')" style="cursor: pointer; padding: 0.5rem; background: #1a1a1a; border-radius: 4px; text-align: center; border: 2px solid #262626;">
-                                    <span style="color: #22c55e;">Over ${(tm.overProb * 100).toFixed(1)}% (${tm.overOdds >= 0 ? '+' : ''}${tm.overOdds})</span>
-                                </div>
-                                <div onclick="toggleBetSelection('total', 'under', ${tm.line}, 'Under ${tm.line.toFixed(1)}')" style="cursor: pointer; padding: 0.5rem; background: #1a1a1a; border-radius: 4px; text-align: center; border: 2px solid #262626;">
-                                    <span style="color: #f87171;">Under ${(tm.underProb * 100).toFixed(1)}% (${tm.underOdds >= 0 ? '+' : ''}${tm.underOdds})</span>
-                                </div>
-                            </div>
-                        `).join('')}
-                    </div>
-                    
-                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem;">2-Way Moneyline</h4>
+            if (!markets) {
+                console.error('No markets found for period:', period);
+                document.getElementById('markets-content').innerHTML = 
+                    `<div class="error">No markets available for ${period}</div>`;
+                return;
+            }
+            
+            console.log('Markets for period:', markets);
+            console.log('Spread markets:', Object.keys(markets.spread || {}));
+            console.log('Total markets:', Object.keys(markets.total || {}));
+            
+            const periodNames = {
+                'q1': '1st Quarter',
+                'q2': '2nd Quarter',
+                'q3': '3rd Quarter',
+                'q4': '4th Quarter',
+                'h1': '1st Half',
+                'h2': '2nd Half',
+                'full': 'Full Game'
+            };
+            
+            let html = '<div class="markets-content">';
+            
+            // Top Scores
+            if (predictions && predictions.length > 0) {
+                html += `
                     <div class="market-section">
-                        <div class="market-grid">
-                            <div class="market-item" onclick="toggleBetSelection('moneyline', 'home', 0, '${homeTeam} ML')" style="cursor: pointer;">
-                                <div class="market-label">${homeTeam}</div>
-                                <div class="market-value">${(ml2way.home * 100).toFixed(1)}%</div>
-                                <div style="font-size: 0.75rem; color: #6b7280;">${ml2way.home_odds >= 0 ? '+' : ''}${ml2way.home_odds}</div>
-                            </div>
-                            <div class="market-item" onclick="toggleBetSelection('moneyline', 'away', 0, '${awayTeam} ML')" style="cursor: pointer;">
-                                <div class="market-label">${awayTeam}</div>
-                                <div class="market-value">${(ml2way.away * 100).toFixed(1)}%</div>
-                                <div style="font-size: 0.75rem; color: #6b7280;">${ml2way.away_odds >= 0 ? '+' : ''}${ml2way.away_odds}</div>
-                            </div>
+                        <div class="market-title">Top Score Predictions</div>
+                        <div class="top-scores">
+                            ${predictions.slice(0, 5).map(pred => `
+                                <div class="score-item">
+                                    <span class="score-label">${pred.score}</span>
+                                    <span class="score-prob">${(pred.probability * 100).toFixed(1)}%</span>
+                                </div>
+                            `).join('')}
                         </div>
                     </div>
-
-                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem;">3-Way Moneyline</h4>
+                `;
+            }
+            
+            // 2-Way Moneyline
+            if (markets.moneyline_2way) {
+                html += `
                     <div class="market-section">
-                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem;">
-                            <div class="market-item" onclick="toggleBetSelection('moneyline_3way', 'home', 0, '${homeTeam} ML (3-way)')" style="cursor: pointer;">
-                                <div class="market-label">${homeTeam}</div>
-                                <div class="market-value">${(markets.moneyline_3way.home * 100).toFixed(1)}%</div>
-                                <div style="font-size: 0.75rem; color: #6b7280;">${markets.moneyline_3way.home_odds >= 0 ? '+' : ''}${markets.moneyline_3way.home_odds}</div>
+                        <div class="market-title">2-Way Moneyline</div>
+                        <div class="moneyline-grid">
+                            <div class="market-option" onclick="selectMarket('moneyline', 'home', 0, '${gameInfo.home_team} ML', '${period}')">
+                                <div class="team">${gameInfo.home_team}</div>
+                                <div class="prob">${(markets.moneyline_2way.home * 100).toFixed(1)}%</div>
+                                <div class="odds">${markets.moneyline_2way.home_odds >= 0 ? '+' : ''}${markets.moneyline_2way.home_odds}</div>
                             </div>
-                            <div class="market-item" onclick="toggleBetSelection('moneyline_3way', 'draw', 0, 'Draw')" style="cursor: pointer;">
-                                <div class="market-label">Draw</div>
-                                <div class="market-value">${(markets.moneyline_3way.draw * 100).toFixed(1)}%</div>
-                                <div style="font-size: 0.75rem; color: #6b7280;">${markets.moneyline_3way.draw_odds >= 0 ? '+' : ''}${markets.moneyline_3way.draw_odds}</div>
-                            </div>
-                            <div class="market-item" onclick="toggleBetSelection('moneyline_3way', 'away', 0, '${awayTeam} ML (3-way)')" style="cursor: pointer;">
-                                <div class="market-label">${awayTeam}</div>
-                                <div class="market-value">${(markets.moneyline_3way.away * 100).toFixed(1)}%</div>
-                                <div style="font-size: 0.75rem; color: #6b7280;">${markets.moneyline_3way.away_odds >= 0 ? '+' : ''}${markets.moneyline_3way.away_odds}</div>
+                            <div class="market-option" onclick="selectMarket('moneyline', 'away', 0, '${gameInfo.away_team} ML', '${period}')">
+                                <div class="team">${gameInfo.away_team}</div>
+                                <div class="prob">${(markets.moneyline_2way.away * 100).toFixed(1)}%</div>
+                                <div class="odds">${markets.moneyline_2way.away_odds >= 0 ? '+' : ''}${markets.moneyline_2way.away_odds}</div>
                             </div>
                         </div>
                     </div>
-        
+                `;
+            }
+            
+            // 3-Way Moneyline
+            if (markets.moneyline_3way) {
+                html += `
+                    <div class="market-section">
+                        <div class="market-title">3-Way Moneyline</div>
+                        <div class="moneyline-3way">
+                            <div class="market-option" onclick="selectMarket('moneyline_3way', 'home', 0, '${gameInfo.home_team} (3-way)', '${period}')">
+                                <div class="team">${gameInfo.home_team}</div>
+                                <div class="prob">${(markets.moneyline_3way.home * 100).toFixed(1)}%</div>
+                                <div class="odds">${markets.moneyline_3way.home_odds >= 0 ? '+' : ''}${markets.moneyline_3way.home_odds}</div>
+                            </div>
+                            <div class="market-option" onclick="selectMarket('moneyline_3way', 'draw', 0, 'Draw', '${period}')">
+                                <div class="team">Draw</div>
+                                <div class="prob">${(markets.moneyline_3way.draw * 100).toFixed(1)}%</div>
+                                <div class="odds">${markets.moneyline_3way.draw_odds >= 0 ? '+' : ''}${markets.moneyline_3way.draw_odds}</div>
+                            </div>
+                            <div class="market-option" onclick="selectMarket('moneyline_3way', 'away', 0, '${gameInfo.away_team} (3-way)', '${period}')">
+                                <div class="team">${gameInfo.away_team}</div>
+                                <div class="prob">${(markets.moneyline_3way.away * 100).toFixed(1)}%</div>
+                                <div class="odds">${markets.moneyline_3way.away_odds >= 0 ? '+' : ''}${markets.moneyline_3way.away_odds}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            // Spread Markets
+            if (markets.spread && Object.keys(markets.spread).length > 0) {
+                html += `
+                    <div class="market-section">
+                        <div class="market-title">
+                            Spread
+                            <span class="market-subtitle">(Est: ${markets.estimated_spread.toFixed(1)})</span>
+                        </div>
+                `;
+                
+                const spreadLines = Object.keys(markets.spread).map(parseFloat).sort((a, b) => a - b);
+                console.log('Rendering spread lines:', spreadLines);
+                
+                spreadLines.forEach(line => {
+                    const spread = markets.spread[line];
+                    if (!spread) {
+                        console.error('Missing spread data for line:', line);
+                        return;
+                    }
                     
-                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem;">Draw & Over 12.5</h4>
-                    <div class="market-section" style="display: flex; justify-content: space-around; padding: 1rem;">
-                        <div style="text-align: center;">
-                            <div style="font-size: 0.875rem; color: #6b7280;">Probability</div>
-                            <div style="font-size: 1.25rem; font-weight: 700; color: #22c55e;">${(markets.draw_and_over_12_5 * 100).toFixed(1)}%</div>
-                        </div>
-                        <div style="text-align: center;">
-                            <div style="font-size: 0.875rem; color: #6b7280;">Fair Odds</div>
-                            <div style="font-size: 1.25rem; font-weight: 700;">${probabilityToAmericanOdds(markets.draw_and_over_12_5)}</div>
-                        </div>
-                    </div>
+                    // Convert line to signed value based on who is favored
+                    const signedLine = gameInfo.spread < 0 ? -line : line;
+                    const homeDisplay = signedLine === 0 ? '0.0' : (signedLine > 0 ? `+${signedLine.toFixed(1)}` : signedLine.toFixed(1));
+                    const awayDisplay = signedLine === 0 ? '0.0' : (signedLine > 0 ? signedLine.toFixed(1) : `+${(-signedLine).toFixed(1)}`);
                     
-                    <h4 style="margin-bottom: 1rem; margin-top: 1.5rem;">Top 20 Score Predictions</h4>
-                    <div class="predictions-list">
-                        ${predictions.map((pred, index) => {
-                            const [home, away] = pred.score.split('-').map(Number);
-                            const total = home + away;
-                            const margin = home - away;
-                            const probClass = pred.probability >= 0.10 ? 'prob-high' : pred.probability >= 0.07 ? 'prob-med-high' : pred.probability >= 0.04 ? 'prob-med' : 'prob-low';
-                            return `<div class="prediction-item"><div class="prediction-left"><div class="rank">#${index + 1}</div><div><div class="score">${pred.score}</div><div class="score-details"><span class="detail-chip">Total: ${total}</span><span class="detail-chip">Margin: ${margin > 0 ? '+' : ''}${margin}</span></div></div></div><div class="probability ${probClass}">${(pred.probability * 100).toFixed(1)}%</div></div>`;
-                        }).join('')}
+                    html += `
+                        <div class="market-line">
+                            <div class="line-label">${homeDisplay}</div>
+                            <div class="market-option" onclick="selectMarket('spread', 'home', ${line}, '${gameInfo.home_team} ${homeDisplay}', '${period}')">
+                                <div class="team">${gameInfo.home_team}</div>
+                                <div class="prob">${(spread.home_cover * 100).toFixed(1)}%</div>
+                                <div class="odds">${spread.home_odds >= 0 ? '+' : ''}${spread.home_odds}</div>
+                            </div>
+                            <div class="market-option" onclick="selectMarket('spread', 'away', ${line}, '${gameInfo.away_team} ${awayDisplay}', '${period}')">
+                                <div class="team">${gameInfo.away_team}</div>
+                                <div class="prob">${(spread.away_cover * 100).toFixed(1)}%</div>
+                                <div class="odds">${spread.away_odds >= 0 ? '+' : ''}${spread.away_odds}</div>
+                            </div>
+                        </div>
+                    `;
+                });
+                html += '</div>';
+            }
+            
+            // Total Markets
+            if (markets.total && Object.keys(markets.total).length > 0) {
+                html += `
+                    <div class="market-section">
+                        <div class="market-title">
+                            Total
+                            <span class="market-subtitle">(Est: ${markets.estimated_total.toFixed(1)})</span>
+                        </div>
+                `;
+                
+                const totalLines = Object.keys(markets.total).map(parseFloat).sort((a, b) => a - b);
+                console.log('Rendering total lines:', totalLines);
+                
+                totalLines.forEach(line => {
+                    const total = markets.total[line];
+                    if (!total || !total.over || !total.under) {
+                        console.error('Missing total data for line:', line, 'Data:', total);
+                        return;
+                    }
+                    
+                    html += `
+                        <div class="market-line">
+                            <div class="line-label">${line.toFixed(1)}</div>
+                            <div class="market-option" onclick="selectMarket('total', 'over', ${line}, 'Over ${line.toFixed(1)}', '${period}')">
+                                <div class="team">Over</div>
+                                <div class="prob">${(total.over * 100).toFixed(1)}%</div>
+                                <div class="odds">${total.over_odds >= 0 ? '+' : ''}${total.over_odds}</div>
+                            </div>
+                            <div class="market-option" onclick="selectMarket('total', 'under', ${line}, 'Under ${line.toFixed(1)}', '${period}')">
+                                <div class="team">Under</div>
+                                <div class="prob">${(total.under * 100).toFixed(1)}%</div>
+                                <div class="odds">${total.under_odds >= 0 ? '+' : ''}${total.under_odds}</div>
+                            </div>
+                        </div>
+                    `;
+                });
+                html += '</div>';
+            }
+            
+            // Highest Scoring Quarter (Full Game only)
+            if (period === 'full' && markets.highest_scoring_quarter) {
+                html += `
+                    <div class="market-section">
+                        <div class="market-title">Highest Scoring Quarter</div>
+                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.625rem; margin-bottom: 0.5rem;">
+                            <div class="market-option" onclick="selectMarket('highest_scoring_quarter', 'q1', 0, '1st Quarter Highest', '${period}')">
+                                <div class="team">1st Quarter</div>
+                                <div class="prob">${(markets.highest_scoring_quarter.q1.prob * 100).toFixed(1)}%</div>
+                                <div class="odds">${markets.highest_scoring_quarter.q1.odds >= 0 ? '+' : ''}${markets.highest_scoring_quarter.q1.odds}</div>
+                            </div>
+                            <div class="market-option" onclick="selectMarket('highest_scoring_quarter', 'q2', 0, '2nd Quarter Highest', '${period}')">
+                                <div class="team">2nd Quarter</div>
+                                <div class="prob">${(markets.highest_scoring_quarter.q2.prob * 100).toFixed(1)}%</div>
+                                <div class="odds">${markets.highest_scoring_quarter.q2.odds >= 0 ? '+' : ''}${markets.highest_scoring_quarter.q2.odds}</div>
+                            </div>
+                            <div class="market-option" onclick="selectMarket('highest_scoring_quarter', 'q3', 0, '3rd Quarter Highest', '${period}')">
+                                <div class="team">3rd Quarter</div>
+                                <div class="prob">${(markets.highest_scoring_quarter.q3.prob * 100).toFixed(1)}%</div>
+                                <div class="odds">${markets.highest_scoring_quarter.q3.odds >= 0 ? '+' : ''}${markets.highest_scoring_quarter.q3.odds}</div>
+                            </div>
+                        </div>
+                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.625rem;">
+                            <div class="market-option" onclick="selectMarket('highest_scoring_quarter', 'q4', 0, '4th Quarter Highest', '${period}')">
+                                <div class="team">4th Quarter</div>
+                                <div class="prob">${(markets.highest_scoring_quarter.q4.prob * 100).toFixed(1)}%</div>
+                                <div class="odds">${markets.highest_scoring_quarter.q4.odds >= 0 ? '+' : ''}${markets.highest_scoring_quarter.q4.odds}</div>
+                            </div>
+                            <div class="market-option" onclick="selectMarket('highest_scoring_quarter', 'tie', 0, 'Tie (Multiple Quarters)', '${period}')">
+                                <div class="team">Tie</div>
+                                <div class="prob">${(markets.highest_scoring_quarter.tie.prob * 100).toFixed(1)}%</div>
+                                <div class="odds">${markets.highest_scoring_quarter.tie.odds >= 0 ? '+' : ''}${markets.highest_scoring_quarter.tie.odds}</div>
+                            </div>
+                            <div style="visibility: hidden;"></div>
+                        </div>
                     </div>
-                </div>
-            `;
-            document.querySelector('.predictions-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+                `;
+            }
+            
+            html += '</div>';
+            
+            console.log('=== END DISPLAY DEBUG ===');
+            document.getElementById('markets-content').innerHTML = html;
         }
 
-        window.addEventListener('load', function() {
-            updateStatus();
-            loadGames();
-        });
-
-        function toggleBetSelection(type, team, line, displayText) {
-            const selectionKey = `${type}-${team}-${line}`;
+        function selectMarket(type, side, line, displayText, period) {
+            const periodNames = {
+                'q1': 'Q1', 'q2': 'Q2', 'q3': 'Q3', 'q4': 'Q4',
+                'h1': '1H', 'h2': '2H', 'full': 'FG'
+            };
             
-            // For totals, team is actually 'over' or 'under', so we need to handle differently
-            let existingIndex;
-            if (type === 'total') {
-                existingIndex = parlaySelections.findIndex(s => 
-                    s.type === type && s.team === team && s.line === line
-                );
-            } else {
-                existingIndex = parlaySelections.findIndex(s => 
-                    s.type === type && s.team === team && (type === 'spread' ? s.line === line : true)
-                );
-            }
+            const selection = {
+                type: type,
+                side: side,
+                team: side,
+                line: line,
+                display: displayText,
+                period: period,
+                periodDisplay: periodNames[period]
+            };
+            
+            // Check if already selected
+            const existingIndex = parlaySelections.findIndex(s =>
+                s.type === type && s.side === side && s.line === line && s.period === period
+            );
             
             if (existingIndex >= 0) {
                 parlaySelections.splice(existingIndex, 1);
             } else {
-                parlaySelections.push({
-                    type: type,
-                    team: team,
-                    line: line,
-                    display: displayText
-                });
+                parlaySelections.push(selection);
             }
             
             updateParlayDisplay();
@@ -900,17 +966,21 @@
         }
 
         function updateParlayDisplay() {
-            const container = document.getElementById('parlay-selections');
+            const container = document.getElementById('sgp-selections');
+            
             if (parlaySelections.length === 0) {
-                container.innerHTML = '<div style="color: #6b7280; text-align: center;">Select bets to build a parlay</div>';
-                document.getElementById('parlay-result').style.display = 'none';
+                container.innerHTML = '<div style="color: #6b7280; text-align: center;">Select markets to build parlay</div>';
+                document.getElementById('sgp-result').style.display = 'none';
                 return;
             }
             
             container.innerHTML = parlaySelections.map((sel, i) => `
-                <div style="background: #1a1a1a; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;">
-                    <span>${sel.display}</span>
-                    <button onclick="removeParlaySelection(${i})" style="background: #7f1d1d; color: white; border: none; padding: 0.25rem 0.5rem; border-radius: 3px; cursor: pointer;">Remove</button>
+                <div class="sgp-selection">
+                    <div>
+                        <span class="sgp-period-badge">${sel.periodDisplay}</span>
+                        <span class="sgp-selection-text">${sel.display}</span>
+                    </div>
+                    <button class="remove-btn" onclick="removeParlaySelection(${i})">Remove</button>
                 </div>
             `).join('');
         }
@@ -922,44 +992,48 @@
         }
 
         async function calculateParlay() {
-            if (parlaySelections.length === 0 || !currentGameData) {
+            if (parlaySelections.length === 0 || !currentData) {
+                document.getElementById('sgp-result').style.display = 'none';
                 return;
             }
             
-            const selections = parlaySelections.map(sel => {
-                const obj = {type: sel.type};
-                if (sel.type === 'spread' || sel.type === 'moneyline' || sel.type === 'moneyline_3way') {
-                    obj.team = sel.team;
-                    if (sel.type === 'spread') obj.line = sel.line;
-                } else if (sel.type === 'total') {
-                    obj.side = sel.team; // 'over' or 'under'
-                    obj.line = sel.line;
-                }
-                return obj;
-            });
-            
             try {
+                const selections = parlaySelections.map(sel => ({
+                    type: sel.type,
+                    side: sel.side,
+                    team: sel.team,
+                    line: sel.line,
+                    period: sel.period
+                }));
+                
                 const response = await fetch('/api/calculate-parlay', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        spread: currentGameData.spread,
-                        total: currentGameData.total,
+                        spread: currentData.game_info.spread,
+                        total: currentData.game_info.total,
                         selections: selections
                     })
                 });
                 
                 if (response.ok) {
                     const result = await response.json();
-                    document.getElementById('parlay-result').style.display = 'block';
-                    document.getElementById('parlay-prob').textContent = `${(result.probability * 100).toFixed(2)}%`;
-                    document.getElementById('parlay-odds').textContent = result.fair_odds >= 0 ? `+${result.fair_odds}` : result.fair_odds;
-                    document.getElementById('parlay-decimal').textContent = result.decimal_odds.toFixed(2);
+                    
+                    document.getElementById('sgp-prob').textContent = `${(result.probability * 100).toFixed(1)}%`;
+                    document.getElementById('sgp-odds').textContent = result.fair_odds >= 0 ? `+${result.fair_odds}` : result.fair_odds;
+                    document.getElementById('sgp-decimal').textContent = result.decimal_odds.toFixed(2);
+                    
+                    document.getElementById('sgp-result').style.display = 'block';
                 }
             } catch (error) {
                 console.error('Parlay calculation error:', error);
             }
         }
+
+        window.addEventListener('load', function() {
+            updateStatus();
+            loadGames();
+        });
     </script>
 </body>
 </html>
