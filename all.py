@@ -861,7 +861,7 @@ class CFBAllQuartersPredictor:
         
         return home_away_predictions
     
-    def simulate_game_with_correlation(self, pregame_spread, total, n_sims=20000, 
+    def simulate_game_with_correlation(self, pregame_spread, total, n_sims=100000, 
                                        q1_dist=None, q2_dist=None, q3_dist=None, q4_dist=None):
         """
         NEW: Simulate full game using Bayesian updating with quarter correlations.
@@ -993,31 +993,38 @@ class CFBAllQuartersPredictor:
         
         return combined_dist
     
-    def calibrate_full_game_distribution(self, pregame_spread, total, max_iterations=20):
+    def calibrate_full_game_distribution(self, pregame_spread, total, max_iterations=10, n_sims=5000):
         """
-        NEW: True calibration approach that adjusts SOURCE quarter distributions.
+        Fast calibration using adaptive simulation sample sizes.
         
-        This replaces the old approach of just forcing one line to 50/50.
+        Strategy:
+        - Early iterations: 2000 sims (fast, rough calibration)
+        - Later iterations: 5000 sims (accurate, fine-tuning)
+        - Uses simulation throughout to capture correlations
         
-        Process:
-        1. Generate initial quarter distributions
-        2. Simulate full game
-        3. Check if P(Fav covers) ≈ 50% and P(Over) ≈ 50%
-        4. If not, calculate adjustment factors
-        5. Proportionally adjust ALL quarter distributions
-        6. Repeat until calibrated
+        Args:
+            pregame_spread: Game spread
+            total: Game total
+            max_iterations: Max iterations (default 10)
+            n_sims: Final simulation count
         
         Returns:
-            Calibrated full game distribution
+            Dict with calibrated quarters and full game
         """
         abs_spread = abs(pregame_spread)
         
+        # Calibration hyperparameters
+        LEARNING_RATE = 0.12      # Slightly higher for faster convergence
+        CLAMP_MIN = 0.94          # ±6% per iteration
+        CLAMP_MAX = 1.06
+        TOLERANCE = 0.010         # 49% - 51% range
+        
         print(f"\n{'='*80}")
-        print(f"TRUE CALIBRATION: Adjusting quarter distributions")
-        print(f"Target: 50% favorite covers {abs_spread:.1f}, 50% over {total:.1f}")
+        print(f"ADAPTIVE CALIBRATION: Fast early, accurate late")
+        print(f"Target: 48% - 52% for spread={abs_spread:.1f}, total={total:.1f}")
         print(f"{'='*80}")
         
-        # Function to calculate full game metrics
+        # Calculate metrics
         def calculate_metrics(dist):
             prob_fav_cover = 0.0
             prob_over = 0.0
@@ -1027,13 +1034,11 @@ class CFBAllQuartersPredictor:
                 margin = fav_score - dog_score
                 game_total = fav_score + dog_score
                 
-                # Spread: handle pushes for whole number lines
                 if margin > abs_spread:
                     prob_fav_cover += prob
                 elif margin == abs_spread:
                     prob_fav_cover += prob * 0.5
                 
-                # Total: handle pushes for whole number lines
                 if game_total > total:
                     prob_over += prob
                 elif game_total == total:
@@ -1041,54 +1046,23 @@ class CFBAllQuartersPredictor:
             
             return prob_fav_cover, prob_over
         
-        # Function to adjust a quarter distribution based on calibration needs
-        def adjust_quarter_dist(q_dist, total_adjustment, spread_adjustment, quarter_pct_total):
-            """
-            Proportionally adjust quarter distribution.
+        # Calculate responsibility
+        def calculate_responsibility(score, expected_q_total, expected_q_margin):
+            fav_score, dog_score = map(int, score.split('-'))
+            score_total = fav_score + dog_score
+            margin = fav_score - dog_score
             
-            total_adjustment: < 1.0 means we need to shift toward lower totals
-            spread_adjustment: < 1.0 means we need to shift toward underdog
-            """
-            adjusted_dist = {}
+            if expected_q_total > 0:
+                total_resp = (score_total - expected_q_total) / expected_q_total
+            else:
+                total_resp = 0.0
             
-            expected_q_total = total * quarter_pct_total
-            expected_q_margin = abs_spread * quarter_pct_total if quarter_pct_total else 0
+            if abs(expected_q_margin) > 0.1:
+                spread_resp = (margin - expected_q_margin) / abs(expected_q_margin)
+            else:
+                spread_resp = margin / 3.0
             
-            for score, prob in q_dist.items():
-                fav_score, dog_score = map(int, score.split('-'))
-                score_total = fav_score + dog_score
-                margin = fav_score - dog_score
-                
-                # Calculate adjustment factor based on score characteristics
-                factor = 1.0
-                
-                # Adjust for total calibration
-                if expected_q_total > 0:
-                    total_deviation = (score_total - expected_q_total) / expected_q_total
-                    # If we need lower totals (total_adjustment < 1), penalize high-scoring outcomes
-                    # If we need higher totals (total_adjustment > 1), boost high-scoring outcomes
-                    total_factor = 1.0 + (total_adjustment - 1.0) * total_deviation
-                    factor *= total_factor
-                
-                # Adjust for spread calibration
-                if expected_q_margin > 0:
-                    margin_deviation = (margin - expected_q_margin) / expected_q_margin if expected_q_margin else 0
-                    # If we need underdog to do better (spread_adjustment < 1), penalize fav blowouts
-                    # If we need favorite to do better (spread_adjustment > 1), boost fav blowouts
-                    spread_factor = 1.0 + (spread_adjustment - 1.0) * margin_deviation
-                    factor *= spread_factor
-                
-                # Clamp factor to reasonable range
-                factor = np.clip(factor, 0.5, 1.5)
-                
-                adjusted_dist[score] = prob * factor
-            
-            # Normalize
-            total_prob = sum(adjusted_dist.values())
-            if total_prob > 0:
-                adjusted_dist = {score: prob / total_prob for score, prob in adjusted_dist.items()}
-            
-            return adjusted_dist
+            return total_resp, spread_resp
         
         # Initialize quarter distributions
         dist_q1 = self.predict_standardized_probability(pregame_spread, total, 1)
@@ -1096,25 +1070,43 @@ class CFBAllQuartersPredictor:
         dist_q3 = self.predict_standardized_probability(pregame_spread, total, 3)
         dist_q4 = self.predict_standardized_probability(pregame_spread, total, 4)
         
-        # Iterative calibration
+        expected_totals = [
+            total * self.Q1_PERCENTAGE_POINTS,
+            total * self.Q2_PERCENTAGE_POINTS,
+            total * self.Q3_PERCENTAGE_POINTS,
+            total * self.Q4_PERCENTAGE_POINTS
+        ]
+        
+        expected_margins = [abs_spread * 0.25] * 4
+        
+        # Adaptive simulation with correlation
         for iteration in range(max_iterations):
-            # Simulate full game with current adjusted quarter distributions
+            # Adaptive sample size: start small, end large
+            if iteration < 3:
+                current_sims = 2000  # Fast early iterations
+            elif iteration < 6:
+                current_sims = 3000  # Medium
+            else:
+                current_sims = n_sims  # Full accuracy for final iterations
+            
+            # Simulate with correlation
             full_game_dist = self.simulate_game_with_correlation(
-                pregame_spread, total, n_sims=50000,
+                pregame_spread, total, n_sims=current_sims,
                 q1_dist=dist_q1, q2_dist=dist_q2, q3_dist=dist_q3, q4_dist=dist_q4
             )
             
-            # Check calibration
             prob_fav_cover, prob_over = calculate_metrics(full_game_dist)
+            total_error = 0.50 - prob_over
+            spread_error = 0.50 - prob_fav_cover
             
-            print(f"\nIteration {iteration + 1}:")
-            print(f"  P(Fav covers {abs_spread:.1f}): {prob_fav_cover*100:.2f}%")
-            print(f"  P(Over {total:.1f}): {prob_over*100:.2f}%")
+            if iteration % 2 == 0:
+                print(f"  Iter {iteration + 1}: Cover={prob_fav_cover*100:.2f}%, Over={prob_over*100:.2f}% ({current_sims} sims)")
             
-            # Check if within tolerance (46.5% to 53.5%)
-            if (0.465 <= prob_fav_cover <= 0.535) and (0.465 <= prob_over <= 0.535):
-                print(f"\n✓ Calibration converged!")
-                # Return both calibrated quarters and full game
+            # Check convergence
+            if abs(total_error) < TOLERANCE and abs(spread_error) < TOLERANCE:
+                print(f"✓ Converged at iteration {iteration + 1}")
+                print(f"  Final Cover: {prob_fav_cover*100:.2f}%")
+                print(f"  Final Over:  {prob_over*100:.2f}%")
                 return {
                     'q1': dist_q1,
                     'q2': dist_q2,
@@ -1123,35 +1115,47 @@ class CFBAllQuartersPredictor:
                     'full_game': full_game_dist
                 }
             
-            # Calculate adjustment factors
-            # If prob_over = 53%, we want to shift toward lower totals
-            # total_adjustment = 0.50 / 0.53 = 0.943
-            total_adjustment = 0.50 / prob_over if prob_over > 0 else 1.0
+            # Apply gradient update
+            quarters = [dist_q1, dist_q2, dist_q3, dist_q4]
             
-            # If prob_fav_cover = 48%, we want to shift toward favorite
-            # spread_adjustment = 0.50 / 0.48 = 1.042
-            spread_adjustment = 0.50 / prob_fav_cover if prob_fav_cover > 0 else 1.0
+            for q_idx, q_dist in enumerate(quarters):
+                updated_dist = {}
+                
+                for score, prob in q_dist.items():
+                    total_resp, spread_resp = calculate_responsibility(
+                        score, expected_totals[q_idx], expected_margins[q_idx]
+                    )
+                    
+                    total_factor = 1.0 + (LEARNING_RATE * total_error * total_resp)
+                    spread_factor = 1.0 + (LEARNING_RATE * spread_error * spread_resp)
+                    
+                    total_factor = np.clip(total_factor, CLAMP_MIN, CLAMP_MAX)
+                    spread_factor = np.clip(spread_factor, CLAMP_MIN, CLAMP_MAX)
+                    
+                    updated_prob = prob * total_factor * spread_factor
+                    updated_dist[score] = updated_prob
+                
+                # Renormalize
+                total_prob = sum(updated_dist.values())
+                if total_prob > 0:
+                    updated_dist = {score: prob / total_prob 
+                                  for score, prob in updated_dist.items()}
+                
+                quarters[q_idx] = updated_dist
             
-            # Clamp adjustments to prevent overcorrection
-            total_adjustment = np.clip(total_adjustment, 0.9, 1.1)
-            spread_adjustment = np.clip(spread_adjustment, 0.9, 1.1)
-            
-            print(f"  Total adjustment factor: {total_adjustment:.4f}")
-            print(f"  Spread adjustment factor: {spread_adjustment:.4f}")
-            
-            # Adjust all quarter distributions proportionally
-            dist_q1 = adjust_quarter_dist(dist_q1, total_adjustment, spread_adjustment, self.Q1_PERCENTAGE_POINTS)
-            dist_q2 = adjust_quarter_dist(dist_q2, total_adjustment, spread_adjustment, self.Q2_PERCENTAGE_POINTS)
-            dist_q3 = adjust_quarter_dist(dist_q3, total_adjustment, spread_adjustment, self.Q3_PERCENTAGE_POINTS)
-            dist_q4 = adjust_quarter_dist(dist_q4, total_adjustment, spread_adjustment, self.Q4_PERCENTAGE_POINTS)
+            dist_q1, dist_q2, dist_q3, dist_q4 = quarters
         
-        # Max iterations reached
-        print(f"\nCalibration reached max iterations ({max_iterations})")
-        print(f"Final metrics:")
-        print(f"  P(Fav covers): {prob_fav_cover*100:.2f}%")
-        print(f"  P(Over): {prob_over*100:.2f}%")
+        # If we hit max iterations, do one final high-quality simulation
+        print(f"\n⚠ Reached max iterations, final simulation...")
+        full_game_dist = self.simulate_game_with_correlation(
+            pregame_spread, total, n_sims=n_sims,
+            q1_dist=dist_q1, q2_dist=dist_q2, q3_dist=dist_q3, q4_dist=dist_q4
+        )
         
-        # Return both the calibrated quarter distributions and full game
+        prob_fav_cover, prob_over = calculate_metrics(full_game_dist)
+        print(f"  Final Cover: {prob_fav_cover*100:.2f}%")
+        print(f"  Final Over:  {prob_over*100:.2f}%")
+        
         return {
             'q1': dist_q1,
             'q2': dist_q2,
@@ -1160,7 +1164,7 @@ class CFBAllQuartersPredictor:
             'full_game': full_game_dist
         }
     
-    def predict(self, pregame_spread, total, debug=False):
+    def predict(self, pregame_spread, total, debug=False, n_sims=5000, max_calibration_iterations=60):
         """
         Generate predictions for all quarters and combine with proper calibration.
         
@@ -1180,7 +1184,11 @@ class CFBAllQuartersPredictor:
         try:
             # NEW: Use calibration method which returns both calibrated full game 
             # and the adjusted quarter distributions used to produce it
-            calibration_result = self.calibrate_full_game_distribution(pregame_spread, total)
+            calibration_result = self.calibrate_full_game_distribution(
+                pregame_spread, total, 
+                max_iterations=max_calibration_iterations, 
+                n_sims=n_sims
+            )
             
             # Extract calibrated quarters and full game
             dist_q1 = calibration_result['q1']
@@ -1301,7 +1309,9 @@ def main():
                 print(f"\nQuarter {q} - Top 10:")
                 for score, prob in sorted_scores:
                     print(f"  {score:<10} {prob*100:>6.2f}%")
-            
+
+            # Over 12.5 Q1 and Draw
+            print(f"\nQ1 Draw & Over 12.5: {sum(p for s, p in result['q1_home_away'].items() if int(s.split('-')[0]) == int(s.split('-')[1]) and sum(map(int, s.split('-'))) > 12.5)*100:.2f}%")
             # Display first half
             dist_h1 = result['h1_home_away']
             sorted_h1 = sorted(dist_h1.items(), key=lambda x: x[1], reverse=True)[:10]
