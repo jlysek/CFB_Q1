@@ -1,444 +1,607 @@
-# Statistical Methodology
+# Statistical Methodology - College Football Quarter Prediction
 
-This document explains the statistical methods used in the College Football Quarter 1 Score Prediction Model. The approach uses orthogonal feature decomposition and two-tier logistic regression to predict Q1 score probability distributions.
+This document explains the statistical methods used in our college football prediction model. 
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Understanding the Problem](#understanding-the-problem)
+- [Core Concepts](#core-concepts)
+- [The Prediction Problem](#the-prediction-problem)
 - [Feature Engineering](#feature-engineering)
-- [Two-Tier Model Architecture](#two-tier-model-architecture)
-- [Empirical Q1 Calibration](#empirical-q1-calibration)
-- [Training Process](#training-process)
-- [Making Predictions](#making-predictions)
+- [Quarter-by-Quarter Modeling](#quarter-by-quarter-modeling)
+- [Correlation Between Quarters](#correlation-between-quarters)
+- [Monte Carlo Simulation](#monte-carlo-simulation)
+- [Calibration Process](#calibration-process)
 - [Worked Example](#worked-example)
 - [Key Takeaways](#key-takeaways)
 
 ---
 
-## Overview
-
-**Goal:** Given pregame spread and total, predict the probability distribution over all possible Q1 scores.
-
-**Input:**
-- Pregame spread (negative = home favored)
-- Pregame total (expected full game points)
-
-**Output:**
-- Probability for every possible Q1 score (0-0, 7-0, 7-7, 14-0, etc.)
-- Valid probability distribution (all probabilities ≥ 0, sum to 1)
-
-**Method:** Independent binary logistic regression with orthogonal features and adaptive regularization.
-
-### Why Orthogonal Features?
-
-Traditional approach uses spread and total directly as features:
-```
-Problem: spread and total are CORRELATED
-- High total games often have smaller spreads (both teams score)
-- Blowout games often have lower totals (one team dominates)
-- Correlation ≈ -0.3 to -0.4 in CFB data
-```
-
-This correlation causes **multicollinearity**, leading to:
-- Unstable coefficient estimates
-- Difficult interpretation (effects are entangled)
-- Poor generalization to new data
-
-**Solution:** Transform features to eliminate correlation.
-
----
-
-## Understanding the Problem
+## Core Concepts
 
 ### Probability Distributions
 
-A probability distribution assigns a probability to every possible outcome. All probabilities must sum to 1.
+A **probability distribution** tells you the chances of every possible outcome. 
 
 **Example: Rolling a die**
 
 | Outcome | Probability |
 |---------|-------------|
-| 1 | 1/6 ≈ 16.7% |
-| 2 | 1/6 ≈ 16.7% |
-| 3 | 1/6 ≈ 16.7% |
-| 4 | 1/6 ≈ 16.7% |
-| 5 | 1/6 ≈ 16.7% |
-| 6 | 1/6 ≈ 16.7% |
-| **Sum** | **1.0 (100%)** |
+| 1 | 16.7% |
+| 2 | 16.7% |
+| 3 | 16.7% |
+| 4 | 16.7% |
+| 5 | 16.7% |
+| 6 | 16.7% |
+| **Total** | **100%** |
 
-### Our Application: Q1 Scores
-
-From 7000+ games, empirical distribution:
-
-| Score | Probability |
-|-------|-------------|
-| 7-0 | 11.0% |
-| 7-7 | 7.6% |
-| 0-7 | 7.1% |
-| 0-0 | 7.1% |
-| 14-0 | 6.6% |
-| ... | ... |
-| **Sum** | **100%** |
 
 ### Conditional Probability
 
-We want: `P(Q1 Score | Spread, Total)`
+**Conditional probability** is "the probability of A happening, GIVEN that B already happened."
 
-"What is the probability of each Q1 score GIVEN the pregame betting lines?"
+**Example: Weather**
+- P(rain tomorrow) = 30%
+- P(rain tomorrow | cloudy today) = 60%
 
-**Example:**
-- Given spread = -7.5, total = 58.5
-- What is P(7-0)? P(7-7)? P(14-0)?
+If it's cloudy today, rain tomorrow becomes more likely. The "|" symbol means "given" or "knowing that."
+
+**Example: Football**
+- P(Q2 is high-scoring) = 25%
+- P(Q2 is high-scoring | Q1 was high-scoring) = 35%
+
+If Q1 had lots of points, Q2 is more likely to have lots of points too. Teams that score early often keep scoring.
+
+### Independence vs Correlation
+
+**Independent events:** Knowing one doesn't tell you about the other
+- Coin flip #1 and coin flip #2
+
+**Correlated events:** Knowing one tells you something about the other
+- Q1 score and Q2 score in football
+
+**Correlation coefficient (r):**
+- r = 0: No relationship
+- r = +0.5: Moderate positive relationship (when one goes up, other tends to go up)
+- r = -0.5: Moderate negative relationship (when one goes up, other tends to go down)
+- r = +1.0: Perfect positive relationship
+
+In our data:
+- Q1 total points and Q2 total points: r = +0.15 (slightly correlated)
+- Q1 margin and Q2 margin: r = +0.12 (slightly correlated)
+
+This means: high-scoring Q1 → slightly more likely to have high-scoring Q2.
+
+### Logistic Regression
+
+**Goal:** Predict probability of yes/no outcomes.
+
+**Example: Will it rain tomorrow?**
+```
+Inputs: Temperature, humidity, cloud cover
+Output: Probability of rain (0% to 100%)
+```
+
+**How it works:**
+
+1. Calculate a "score" using the inputs:
+   ```
+   score = β₀ + β₁×temperature + β₂×humidity + β₃×clouds
+   ```
+
+2. Convert score to probability using the **sigmoid function**:
+   ```
+   probability = 1 / (1 + e^(-score))
+   ```
+
+**Sigmoid function properties:**
+- Very negative score → probability near 0%
+- Score of 0 → probability = 50%
+- Very positive score → probability near 100%
+- Always gives a valid probability between 0% and 100%
+
+**The coefficients (β values):**
+- β₁ > 0: As temperature increases, probability of rain increases
+- β₁ < 0: As temperature increases, probability of rain decreases
+- β₁ = 0: Temperature doesn't affect rain probability
 
 ---
+
+## The Prediction Problem
+
+### What We're Predicting
+
+**Input:** Pregame betting lines
+- Spread: -7.5 (home favored by 7.5 points)
+- Total: 58.5 (expected combined score)
+
+**Output:** Probability distribution for every possible score in every quarter
+
+**Example Q1 predictions:**
+
+| Score | Probability | Why |
+|-------|-------------|-----|
+| 7-0 | 10.2% | Most common score overall |
+| 7-7 | 6.8% | Both teams score once |
+| 14-0 | 5.4% | Favored team scores twice |
+| 0-0 | 4.1% | Defensive start |
+| 3-0 | 4.0% | Field goal only |
 
 ## Feature Engineering
 
-The key innovation is transforming correlated inputs into orthogonal (uncorrelated) features.
+### The Problem with Raw Inputs
 
-### Step 1: Decompose Spread and Total
+Spread and total are **correlated** (not independent):
 
-The spread and total implicitly tell us each team's expected points:
+| Game Type | Typical Spread | Typical Total |
+|-----------|---------------|---------------|
+| Both teams good | -3 (small) | 58 (high) |
+| One team dominates | -14 (large) | 52 (medium) |
+| Defensive struggle | -7 (medium) | 45 (low) |
+
+Notice: Large spreads often come with lower totals. This is **multicollinearity** - the inputs contain overlapping information.
+
+**Problem:** When features are correlated, the model can't tell which one is causing the effect. 
+
+### The Solution: Orthogonal Features
+
+We transform the correlated inputs into **orthogonal** (uncorrelated) features.
+
+**Step 1: Decompose into team expectations**
+
+The spread and total implicitly tell us each team's expected score:
 
 ```
-Spread = Expected home points - Expected away points
-Total = Expected home points + Expected away points
+Spread = Home expected - Away expected
+Total = Home expected + Away expected
 
-Solve for individual team expectations:
-  Favorite expected points = (Total + |Spread|) / 2
-  Underdog expected points = (Total - |Spread|) / 2
+Solving for individual teams:
+  Favorite expected = (Total + |Spread|) / 2
+  Underdog expected = (Total - |Spread|) / 2
 ```
 
 **Example:**
 ```
-Spread = -7.5 (home favored by 7.5)
+Spread = -7.5 (home favored)
 Total = 58.5
 
-Favorite (home) expected: (58.5 + 7.5) / 2 = 33.0 points
-Underdog (away) expected: (58.5 - 7.5) / 2 = 26.0 points
+Home (favorite) expected = (58.5 + 7.5) / 2 = 33.0 points
+Away (underdog) expected = (58.5 - 7.5) / 2 = 26.0 points
 ```
 
-### Step 2: Normalize by Typical Team Score
+**Step 2: Normalize**
 
-Normalize to make features scale-invariant:
+Divide by typical team score to make features scale-invariant:
 
 ```python
-typical_team_score = 27.5  # Average team score in CFB (learned from data)
-
-norm_fav = implied_fav_points / typical_team_score
-norm_dog = implied_dog_points / typical_team_score
-```
-
-**Example continued:**
-```
+typical_team_score = 27.5  # Average in CFB
 norm_fav = 33.0 / 27.5 = 1.200
 norm_dog = 26.0 / 27.5 = 0.945
 ```
 
-### Step 3: Create Orthogonal Features
-
-Transform to orthogonal basis:
+**Step 3: Create orthogonal features**
 
 ```python
-feature_total = norm_fav + norm_dog   # Sum captures overall scoring level
-feature_margin = norm_fav - norm_dog  # Difference captures expected margin
+feature_total = norm_fav + norm_dog = 1.200 + 0.945 = 2.145
+feature_margin = norm_fav - norm_dog = 1.200 - 0.945 = 0.255
 ```
 
-**Example completed:**
-```
-feature_total = 1.200 + 0.945 = 2.145  (high-scoring game)
-feature_margin = 1.200 - 0.945 = 0.255  (moderate favorite)
-```
+**Why this works:**
 
-### Why This Works
+These new features are **orthogonal** - they're uncorrelated by mathematical construction. Think of them as:
+- **feature_total:** How much scoring should we expect? (2.145 = high scoring)
+- **feature_margin:** How lopsided should the game be? (0.255 = moderate favorite)
 
-**Mathematical property:**
-```
-Correlation(feature_total, feature_margin) ≈ 0
-```
+### Interpreting the Features
 
-By construction, these features are uncorrelated when spread and total vary independently.
+| feature_total | feature_margin | Game Type |
+|---------------|----------------|-----------|
+| 2.2 | 0.1 | High-scoring, close game (45-42) |
+| 2.2 | 0.5 | High-scoring, blowout (38-24) |
+| 1.8 | 0.1 | Low-scoring, close game (20-17) |
+| 1.8 | 0.5 | Low-scoring, blowout (27-13) |
 
-**Interpretation:**
-- `feature_total`: How much scoring to expect (drives total points)
-- `feature_margin`: How lopsided the scoring will be (drives margin)
-
-**Visual intuition:**
-```
-High total, small spread     → High feature_total, low feature_margin
-High total, large spread     → High feature_total, high feature_margin  
-Low total, small spread      → Low feature_total, low feature_margin
-Low total, large spread      → Low feature_total, high feature_margin
-```
-
-The features cleanly separate "how much" from "how lopsided".
+The features cleanly separate:
+- **How much** scoring (total)
+- **How lopsided** the scoring (margin)
 
 ---
 
-## Two-Tier Model Architecture
+## Quarter-by-Quarter Modeling
 
-Not all scores have enough data for reliable individual models. We use a two-tier approach:
+### The Approach: One Model Per Score
 
-### Tier 1: Common Scores (≥10 occurrences)
+For each possible quarter score (7-0, 7-7, 14-0, etc.), we train a separate logistic regression model.
 
-Each score gets its own logistic regression model:
-
+**The model:**
 ```
-logit(score) = β₀ + β₁×feature_total + β₂×feature_margin
+P(score happens) = sigmoid(β₀ + β₁×feature_total + β₂×feature_margin)
 ```
 
-**Coefficients have logical constraints:**
+Each score learns its own β values.
 
-| Score Type | β₁ (total) | β₂ (margin) | Logic |
-|------------|-----------|-------------|-------|
-| 0-0 | Negative | Near zero | Less likely with high scoring |
-| 7-0 (fav) | Positive | Positive | More likely with scoring + favored |
-| 14-0 (fav blowout) | Positive | Strong positive | Much more likely with large margin |
-| 7-7 (tie) | Positive | Negative | More likely with scoring, less with margin |
-| 0-7 (dog win) | Small | Negative | More likely when underdog strong |
+### Two-Tier Architecture
 
-These constraints are enforced via bounded optimization.
+Not all scores have enough data for reliable models:
 
-### Tier 2: Rare Scores (<10 occurrences)
+**Tier 1: Anchor Scores (≥50 occurrences)**
 
-Scores with insufficient data are grouped into buckets:
+These get individual models. In Q1:
+- 7-0: 775 occurrences
+- 7-7: 528 occurrences
+- 0-0: 498 occurrences
+- 14-0: 460 occurrences
+- And about 40 more...
 
-**Bucket categories:**
+**Tier 2: Rare Scores (<50 occurrences)**
 
-| Bucket | Description | Example Scores |
-|--------|-------------|----------------|
-| `other_fav_blowout` | Favored team wins by 7+ | 14-0, 21-7, 28-14, 21-0 |
-| `other_fav_close` | Favored team wins by 1-6 | 10-7, 7-3, 14-10, 17-14 |
-| `other_dog_win` | Underdog team wins | 0-7, 3-10, 7-14, 0-14 |
-| `other_tie` | Tied scores | 3-3, 14-14, 17-17, 10-10 |
+These are grouped into categories:
 
-**Bucket model prediction:**
+| Category | Description | Example Scores |
+|----------|-------------|----------------|
+| Favorite blowout | Fav wins by 14+ | 21-0, 28-7, 21-7 |
+| Favorite wins | Fav wins by 7-13 | 10-3, 14-7, 17-7 |
+| Close game | Fav wins by 1-6 | 7-3, 10-7, 14-10 |
+| Underdog wins | Dog wins | 0-7, 3-10, 7-14 |
+| Ties | Tied score | 3-3, 14-14, 10-10 |
 
-```
-1. Train logistic regression for entire bucket
-   P(any score in bucket) = sigmoid(β₀ + β₁×feature_total + β₂×feature_margin)
+**How rare scores work:**
 
-2. Distribute bucket probability among scores proportionally
-   P(specific score) = P(bucket) × (empirical proportion of score in bucket)
-```
+1. Train model for entire category
+2. Predict category probability
+3. Distribute among scores proportionally
 
 **Example:**
 ```
-Bucket "other_tie" has 15 rare tied scores
-Empirical proportions: 3-3 → 40%, 14-14 → 30%, 17-17 → 20%, 10-10 → 10%
+Category "ties" has P(category) = 5%
+Historical proportions: 3-3 (40%), 14-14 (30%), 10-10 (30%)
 
-If P(other_tie bucket) = 0.05:
-  P(3-3) = 0.05 × 0.40 = 0.020 (2.0%)
-  P(14-14) = 0.05 × 0.30 = 0.015 (1.5%)
-  P(17-17) = 0.05 × 0.20 = 0.010 (1.0%)
-  P(10-10) = 0.05 × 0.10 = 0.005 (0.5%)
+Final predictions:
+  P(3-3) = 5% × 40% = 2.0%
+  P(14-14) = 5% × 30% = 1.5%
+  P(10-10) = 5% × 30% = 1.5%
 ```
 
-This allows rare scores to borrow information from similar scores while maintaining individual identities.
+### Learning Logical Patterns
+
+The models learn sensible patterns through coefficient signs:
+
+**Score 0-0 (scoreless tie):**
+- β₁ (total) = -0.8 (negative)
+- β₂ (margin) = 0.0 (near zero)
+- **Logic:** High-scoring games rarely stay 0-0
+
+**Score 14-0 (favorite blowout start):**
+- β₁ (total) = +0.8 (positive)
+- β₂ (margin) = +1.2 (strongly positive)
+- **Logic:** More likely when both scoring AND margin are high
+
+**Score 7-7 (tie):**
+- β₁ (total) = +0.3 (positive)
+- β₂ (margin) = -0.5 (negative)
+- **Logic:** Needs scoring but unlikely with large margin
+
+These patterns emerge from training on 7,000+ games.
 
 ---
 
-## Empirical Q1 Calibration
+## Correlation Between Quarters
 
-The model automatically learns Q1 scoring rates from historical data rather than assuming fixed percentages.
+### Why Independence Fails
 
-### Q1 as Percentage of Full Game
-
-**Points percentage:**
-```python
-Q1_points = (Q1_home + Q1_away) / (Game_home + Game_away)
-Empirical average: 23.5%
+**Naive approach:**
+```
+P(Full game) = P(Q1) × P(Q2) × P(Q3) × P(Q4)
 ```
 
-The intercept term in each model implicitly learns this ~23.5% factor.
+This assumes quarters are independent, but they're not:
 
-**Margin percentage:**
-```python
-Q1_margin_pct = |Q1_margin| / |Game_margin|
+**Evidence from data:**
+- Q1-Q2 total correlation: r = +0.15
+- Q1-Q2 margin correlation: r = +0.12
+- Q3-Q4 total correlation: r = +0.18
+- Q3-Q4 margin correlation: r = +0.14
+
+**What this means:**
+- High-scoring Q1 → Slightly more likely to have high-scoring Q2
+- Blowout Q1 → Slightly more likely to have blowout Q2
+
+### Conditional Probability Approach
+
+Instead of independence, we use:
+
+```
+P(Full game) = P(Q1) × P(Q2|Q1) × P(Q3|H1) × P(Q4|H1,Q3)
 ```
 
-This percentage varies by spread magnitude and is learned via **cubic spline interpolation**:
+Where:
+- P(Q2|Q1) = Probability of Q2 score given Q1 outcome
+- P(Q3|H1) = Probability of Q3 score given first half outcome
+- P(Q4|H1,Q3) = Probability of Q4 score given entire game context
 
-| Game Spread | Q1 Margin % | Games |
-|-------------|-------------|-------|
-| 3 | 24.1% | ~800 |
-| 7 | 23.8% | ~1200 |
-| 10 | 22.9% | ~900 |
-| 14 | 22.3% | ~700 |
-| 21 | 21.1% | ~400 |
-| 28+ | 19.8% | ~200 |
+### Learning Conditional Distributions
 
-**Pattern:** Closer games see proportionally more of the margin manifest in Q1. Blowouts spread margin more evenly across quarters.
+**Step 1: Categorize prior outcomes**
 
-The model incorporates this via a smooth interpolator rather than discrete buckets.
+We can't track every possible Q1 score separately (not enough data). Instead, we categorize:
+
+**By total points:**
+- Low: 0-7 points
+- Medium: 8-20 points
+- High: 21+ points
+
+**By margin type:**
+- Tie: 0 point difference
+- Close favorite: 1-7 point lead
+- Blowout favorite: 8+ point lead
+- Close underdog: 1-7 point deficit
+- Blowout underdog: 8+ point deficit
+
+**Example categories:**
+- "low_tie" = 0-0, 3-3, 7-7
+- "med_close_fav" = 10-7, 14-7, 14-10
+- "high_blow_fav" = 21-0, 28-7, 21-7
+
+**Step 2: Count conditional frequencies**
+
+For each category, track what happens next:
+
+**Example: After "low_tie" Q1 (like 7-7):**
+```
+Q2 outcomes:
+  0-0: 8%
+  7-0: 12%
+  7-7: 9%
+  14-7: 7%
+  ...
+```
+
+**Example: After "high_blow_fav" Q1 (like 21-0):**
+```
+Q2 outcomes:
+  0-0: 6%
+  7-0: 15%  (favorite keeps scoring)
+  0-7: 8%   (underdog responds)
+  ...
+```
+
+**Step 3: Apply conditional probabilities**
+
+When predicting Q2, we:
+1. Look at simulated Q1 outcome
+2. Find its category
+3. Adjust Q2 base probabilities using the conditional distribution
+
+**Blending formula:**
+```
+P(Q2 score) = 70% × Base model + 30% × Conditional probability
+```
+
+The 70/30 split balances:
+- Base model (from regression, uses betting lines)
+- Conditional adjustment (from history, captures correlation)
+
+### Building the Chain
+
+**Q1:** Use base model only
+```
+P(Q1) from betting lines
+```
+
+**Q2:** Condition on Q1
+```
+P(Q2) = Adjust base model using P(Q2|Q1 category)
+```
+
+**Q3:** Condition on first half
+```
+H1 = Q1 + Q2
+P(Q3) = Adjust base model using P(Q3|H1 category)
+```
+
+**Q4:** Condition on first half and Q3
+```
+P(Q4) = Adjust base model using P(Q4|H1 category, Q3 category)
+```
+
+This creates a Bayesian chain where each quarter's prediction uses all prior information.
 
 ---
 
-## Training Process
+## Monte Carlo Simulation
 
-### Data Preparation
+### The Concept
 
-**1. Standardize to favored-underdog orientation:**
+**Monte Carlo simulation:** Run the game thousands of times with random outcomes based on probabilities, then count the results.
 
-All scores are oriented relative to the favored team for modeling:
+### Our Football Simulation
+
+**For each of 5,000 simulations:**
+
+1. **Sample Q1** from its distribution
+   ```
+   Draw random number between 0 and 1
+   Use that to pick a Q1 score based on probabilities
+   ```
+
+2. **Sample Q2** given Q1
+   ```
+   Look at Q1 category (e.g., "med_close_fav")
+   Adjust Q2 probabilities based on P(Q2|Q1)
+   Draw Q2 score from adjusted distribution
+   ```
+
+3. **Calculate first half**
+   ```
+   H1 = Q1 + Q2
+   ```
+
+4. **Sample Q3** given H1
+   ```
+   Look at H1 category
+   Adjust Q3 probabilities based on P(Q3|H1)
+   Draw Q3 score
+   ```
+
+5. **Sample Q4** given everything
+   ```
+   Look at H1 and Q3 categories
+   Adjust Q4 probabilities based on P(Q4|H1,Q3)
+   Draw Q4 score
+   ```
+
+6. **Calculate full game**
+   ```
+   Full game = Q1 + Q2 + Q3 + Q4
+   ```
+
+**After 5,000 simulations:**
 ```
-If home favored (spread < 0):
-  favored_score = home_score
-  underdog_score = away_score
-  
-If away favored (spread > 0):
-  favored_score = away_score
-  underdog_score = home_score
-```
-
-This allows the model to learn patterns like "favored team scores 14, underdog scores 0" rather than learning separate patterns for "home 14, away 0" and "home 0, away 14" when the favorite changes.
-
-**2. Compute orthogonal features for all games:**
-
-```python
-for each game:
-    abs_spread = |pregame_spread|
-    total = pregame_total
-    
-    implied_fav = (total + abs_spread) / 2
-    implied_dog = (total - abs_spread) / 2
-    
-    norm_fav = implied_fav / typical_team_score
-    norm_dog = implied_dog / typical_team_score
-    
-    feature_total = norm_fav + norm_dog
-    feature_margin = norm_fav - norm_dog
-```
-
-### Model Fitting
-
-**For each common score:**
-
-Minimize regularized negative log-likelihood:
-
-```
-Loss = -Σ[y×log(p) + (1-y)×log(1-p)] + Penalty
-
-where:
-  y = 1 if game had this score, 0 otherwise
-  p = sigmoid(β₀ + β₁×feature_total + β₂×feature_margin)
-```
-
-**Elastic Net regularization:**
-
-```python
-α = 0.1 × (1 + 1/max(n_occurrences, 5))  # Adaptive strength
-penalty = α × [0.3×|β - β_prior| + 0.7×(β - β_prior)²]
-         = α × [L1_component + L2_component]
+Count how often each full game score appeared:
+  31-24: 156 times → 156/5000 = 3.12%
+  28-21: 142 times → 142/5000 = 2.84%
+  34-27: 133 times → 133/5000 = 2.66%
+  ...
 ```
 
-**Why Elastic Net?**
-- **L1 (Lasso):** Encourages sparse solutions, can zero out features
-- **L2 (Ridge):** Shrinks coefficients smoothly toward prior
-- **Combination:** Gets benefits of both
 
-**Prior specification:**
+## Calibration Process
 
-```python
-β₀_prior = logit(empirical_frequency)
-β₁_prior = 0  # No prior belief about total effect
-β₂_prior = 0  # No prior belief about margin effect
-```
+### The Problem
 
-**Optimization:**
-
-Uses L-BFGS-B algorithm with bounded search:
-- Intercept bounds: `[prior_logit - 5, prior_logit + 5]`
-- Coefficient bounds: Set based on score type (see logical constraints above)
-- Typical convergence: 20-50 iterations
-
-**For each rare score bucket:**
-
-Same process but:
-- Binary target: 1 if score in bucket, 0 otherwise
-- Larger sample size → more stable fit
-- Distributes probability among bucket members
-
-### Feature Selection
-
-After fitting, the model reports which features were effectively dropped:
+After simulation, our full game distribution might not match the Pregame Market Inputs:
 
 ```
-Feature 'total': Dropped in 15/120 models (12.5%)
-Feature 'margin': Dropped in 8/120 models (6.7%)
+Market: -7.5 spread, 58.5 total
+Our simulation:
+  Favorite covers spread: 54% (should be 50%)
+  Game goes over total: 48% (should be 50%)
 ```
 
-A feature is "dropped" when Elastic Net shrinks its coefficient below 0.01.
+**Why?** Our quarter models were trained independently, and even with correlation modeling, small biases can compound.
 
----
+### The Solution: Iterative Calibration
 
-## Making Predictions
+**Goal:** Adjust quarter distributions so the simulated full game matches market exactly.
 
-### Prediction Pipeline
+### The Algorithm
 
-**Given:** New game with spread = -7.5, total = 58.5
-
-**Step 1: Compute orthogonal features**
-
-```python
-abs_spread = 7.5
-implied_fav = (58.5 + 7.5) / 2 = 33.0
-implied_dog = (58.5 - 7.5) / 2 = 26.0
-
-norm_fav = 33.0 / 27.5 = 1.200
-norm_dog = 26.0 / 27.5 = 0.945
-
-feature_total = 2.145
-feature_margin = 0.255
+**Setup:**
+```
+Target: 50% cover spread, 50% over total
+Tolerance: 49-51% (within 1%)
+Max iterations: 10
 ```
 
-**Step 2: Calculate logit for each score**
+**Each iteration:**
 
-For each score with a trained model:
-```python
-logit = β₀ + β₁×2.145 + β₂×0.255
+1. **Simulate full game** with current quarter distributions
+   ```
+   Run 2,000-5,000 simulations (adaptive)
+   ```
+
+2. **Calculate errors**
+   ```
+   spread_error = 50% - P(favorite covers)
+   total_error = 50% - P(over total)
+   ```
+
+3. **Determine responsibility** for each quarter score
+   ```
+   For score 14-7 (21 total points, +7 margin):
+   
+   If full game is scoring too high:
+     → This score is "responsible" (it's high-scoring)
+     → Reduce its probability
+     
+   If full game is scoring too low:
+     → This score helps (it's low-scoring)
+     → Increase its probability
+   ```
+
+4. **Apply proportional adjustments** to ALL four quarters
+   ```
+   For each quarter Q in [Q1, Q2, Q3, Q4]:
+     For each score in Q:
+       total_factor = 1.0 + 0.12 × total_error × total_responsibility
+       margin_factor = 1.0 + 0.12 × spread_error × margin_responsibility
+       
+       new_prob = old_prob × total_factor × margin_factor
+   ```
+
+5. **Renormalize** each quarter to sum to 100%
+
+6. **Check convergence**
+   ```
+   If |spread_error| < 1% AND |total_error| < 1%:
+     Done!
+   ```
+
+### Responsibility Calculation
+
+**How much does a score contribute to the error?**
+
+**For total points:**
+```
+score_total = 21 (for 14-7)
+expected_quarter_total = 13.5 (23.5% of 58.5)
+
+total_responsibility = (21 - 13.5) / 13.5 = +0.56
+
+If total_error = +2% (scoring too high):
+  Adjustment = -2% × 0.56 = -1.1%
+  → Reduce probability of 14-7
 ```
 
-Convert to raw probability:
-```python
-raw_prob = 1 / (1 + exp(-logit))
+**For spread:**
+```
+score_margin = +7 (favorite ahead)
+expected_quarter_margin = 1.9 (25% of 7.5)
+
+margin_responsibility = (7 - 1.9) / 1.9 = +2.7
+
+If spread_error = -2% (favorite covering too often):
+  Adjustment = -2% × 2.7 = -5.4%
+  → Reduce probability of 14-7
 ```
 
-**Step 3: Handle orientation**
-
-Since models are trained in favored-underdog orientation:
-
-```python
-if home_favored:
-    P(home=7, away=0) = P_model(fav=7, dog=0)
-    P(home=0, away=7) = P_model(fav=0, dog=7)
-else:  # away favored
-    P(home=7, away=0) = P_model(fav=0, dog=7)
-    P(home=0, away=7) = P_model(fav=7, dog=0)
+**Combined effect:**
+```
+new_prob = old_prob × (1 - 1.1%) × (1 - 5.4%)
+         = old_prob × 0.989 × 0.946
+         = old_prob × 0.935
+         
+If 14-7 was 4%, it becomes 4% × 0.935 = 3.74%
 ```
 
-**Step 4: Normalize to valid distribution**
+### Adaptive Sample Sizes
 
-```python
-total = Σ raw_prob(all scores)
-for each score:
-    final_prob(score) = raw_prob(score) / total
+To speed up calibration:
+
+**Early iterations (rough adjustment):**
+```
+Iterations 1-3: 2,000 simulations (fast, ~1 second)
+Iterations 4-6: 3,000 simulations (medium, ~1.5 seconds)
+Iterations 7-10: 5,000 simulations (accurate, ~2.5 seconds)
 ```
 
-This ensures probabilities sum to exactly 1.
+**Why:** Early iterations make big changes, don't need high precision. Final iterations fine-tune, need accuracy.
 
-### Output Format
+### Example Calibration Run
 
 ```
-Rank  Score     Probability  Percentage
-1     7-0       0.092834     9.28%
-2     7-7       0.068145     6.81%
-3     14-0      0.054287     5.43%
-4     0-0       0.041502     4.15%
-5     3-0       0.039871     3.99%
-...
+Target: 48-52% for spread=-7.5, total=58.5
+
+Iter 1: Cover=54.2%, Over=48.1% (2000 sims)
+Iter 2: Cover=52.3%, Over=49.4% (2000 sims)  
+Iter 3: Cover=51.1%, Over=50.2% (2000 sims)
+Iter 4: Cover=50.8%, Over=49.8% (3000 sims)
+Iter 5: Cover=50.3%, Over=50.1% (3000 sims)
+✓ Converged at iteration 5
+  Final Cover: 50.3%
+  Final Over: 50.1%
 ```
+
+Total time: ~8 seconds
 
 ---
 
@@ -446,14 +609,11 @@ Rank  Score     Probability  Percentage
 
 ### Setup
 
-**Game:** Alabama (-10.5) vs Auburn, Total 54.5
+**Game:** Alabama (-10.5) vs Auburn  
+**Total:** 54.5  
+**Historical data:** 7,042 games
 
-**Historical data:**
-- Total games: 7042
-- Score 14-0 occurred 460 times (6.53%)
-- Score 7-7 occurred 528 times (7.50%)
-
-### Step 1: Compute Features
+### Step 1: Calculate Features
 
 ```
 abs_spread = 10.5
@@ -468,233 +628,289 @@ feature_margin = 1.182 - 0.800 = 0.382
 ```
 
 **Interpretation:**
-- Total of 1.982 → Moderate scoring game (typical is ~2.0)
-- Margin of 0.382 → Solid favorite (positive margin expected)
+- feature_total = 1.982 → Moderate scoring (typical is ~2.0)
+- feature_margin = 0.382 → Solid favorite 
 
-### Step 2: Score 14-0 (Favored Blowout)
+### Step 2: Q1 Base Predictions
 
-**Empirical probability:**
+**Score 7-0 (most common):**
 ```
-P(14-0) = 460 / 7042 = 0.0653
-logit_prior = log(0.0653 / 0.9347) = -2.65
+Empirical: 775/7042 = 11.0%
+Model parameters: β₀=-2.18, β₁=+0.42, β₂=+0.31
+
+logit = -2.18 + 0.42×1.982 + 0.31×0.382
+      = -2.18 + 0.833 + 0.118  
+      = -1.229
+
+probability = 1 / (1 + e^1.229) = 22.6% (before normalization)
 ```
 
-**Trained model:**
+**Score 14-0 (favorite blowout):**
 ```
-β₀ = -2.60   (intercept, slightly above prior)
-β₁ = +0.83   (total effect: more likely with scoring)
-β₂ = +1.12   (margin effect: much more likely with large margin)
-```
+Empirical: 460/7042 = 6.53%
+Model parameters: β₀=-2.60, β₁=+0.83, β₂=+1.12
 
-**Calculate logit:**
-```
 logit = -2.60 + 0.83×1.982 + 1.12×0.382
       = -2.60 + 1.645 + 0.428
       = -0.527
+
+probability = 1 / (1 + e^0.527) = 37.1% (before normalization)
 ```
 
-**Convert to probability:**
-```
-raw_prob = 1 / (1 + exp(0.527))
-         = 1 / 1.694
-         = 0.371 (37.1% before normalization)
-```
+Notice: 14-0 gets a huge boost from high margin coefficient (+1.12).
 
-**After normalizing all scores:**
+**Score 7-7 (tie):**
 ```
-P(14-0) = 0.089 (8.9%)
-```
+Empirical: 528/7042 = 7.50%
+Model parameters: β₀=-2.48, β₁=+0.31, β₂=-0.52
 
-### Step 3: Score 7-7 (Tie)
-
-**Empirical probability:**
-```
-P(7-7) = 528 / 7042 = 0.0750
-logit_prior = log(0.0750 / 0.9250) = -2.51
-```
-
-**Trained model:**
-```
-β₀ = -2.48   (close to prior)
-β₁ = +0.31   (total effect: more likely with scoring)
-β₂ = -0.52   (margin effect: less likely with large margin)
-```
-
-**Calculate logit:**
-```
 logit = -2.48 + 0.31×1.982 + (-0.52)×0.382
       = -2.48 + 0.614 - 0.199
       = -2.065
+
+probability = 1 / (1 + e^2.065) = 11.3% (before normalization)
 ```
 
-**Convert to probability:**
-```
-raw_prob = 1 / (1 + exp(2.065))
-         = 1 / 8.88
-         = 0.113 (11.3% before normalization)
-```
+Notice: 7-7 gets penalized by negative margin coefficient (-0.52).
 
-**After normalizing all scores:**
+**After normalizing all 80+ Q1 scores:**
 ```
-P(7-7) = 0.064 (6.4%)
+7-0  → 10.2%
+14-0 → 8.9%  (up from 6.5% empirical due to large spread)
+7-7  → 6.4%  (down from 7.5% empirical due to large spread)
 ```
 
-### Step 4: Interpretation
+### Step 3: First Simulation
 
-| Score | Empirical | Model | Change | Why |
-|-------|-----------|-------|--------|-----|
-| 14-0 | 6.53% | 8.90% | +2.37% | Large favorite makes blowout more likely |
-| 7-7 | 7.50% | 6.40% | -1.10% | Large spread makes tie less likely |
+**Run 1 of 5,000:**
 
-**Feature effects:**
+1. Sample Q1: Draw random number 0.327 → Falls in 7-0 bucket (10.2%)
+   ```
+   Q1 = 7-0
+   Q1 category: "low_close_fav" (7 points, +7 margin)
+   ```
 
-For 14-0:
-- `feature_total` (1.982) → +1.65 logit points (moderate scoring helps)
-- `feature_margin` (0.382) → +0.43 logit points (margin helps significantly)
-- **Net effect:** Probability increases substantially
+2. Adjust Q2 probabilities based on Q1:
+   ```
+   Base P(7-7) = 6.8%
+   P(7-7|low_close_fav) = 8.2% (from historical data)
+   
+   Adjusted P(7-7) = 0.7×6.8% + 0.3×8.2% = 4.76% + 2.46% = 7.22%
+   ```
+   
+   Sample Q2: Draw 0.512 → Falls in 7-7 bucket
+   ```
+   Q2 = 7-7
+   H1 = 7-0 + 7-7 = 14-7 (21 points, +7 margin)
+   H1 category: "med_close_fav"
+   ```
 
-For 7-7:
-- `feature_total` (1.982) → +0.61 logit points (scoring helps ties too)
-- `feature_margin` (0.382) → -0.20 logit points (margin hurts ties)
-- **Net effect:** Margin effect dominates, probability decreases
+3. Adjust Q3 probabilities based on H1:
+   ```
+   Sample Q3: Gets 7-3
+   Q3 = 7-3
+   Q3 category: "low_close_fav"
+   ```
 
-### Step 5: Full Distribution
+4. Adjust Q4 probabilities based on H1 and Q3:
+   ```
+   Sample Q4: Gets 7-7
+   Q4 = 7-7
+   ```
 
-Top 10 predictions for this game:
+5. Calculate full game:
+   ```
+   Full game = 14-7 + 7-3 + 7-7 = 28-17
+   Alabama wins by 11 (covers 10.5)
+   Total = 45 (under 54.5)
+   ```
 
-| Rank | Score | Probability | Interpretation |
-|------|-------|-------------|----------------|
-| 1 | 7-0 | 10.2% | Most common score, favorite scoring first |
-| 2 | 14-0 | 8.9% | Large margin increases blowout probability |
-| 3 | 7-7 | 6.4% | Moderate scoring allows tie despite margin |
-| 4 | 10-0 | 5.1% | Field goal-touchdown combo |
-| 5 | 0-0 | 4.8% | Defensive start |
-| 6 | 3-0 | 4.2% | Field goal only |
-| 7 | 14-7 | 3.9% | Both teams score, favorite ahead |
-| 8 | 0-7 | 3.1% | Underdog wins Q1 (less likely given margin) |
-| 9 | 21-0 | 2.8% | Extreme blowout start |
-| 10 | 7-3 | 2.6% | Close game despite spread |
+**Run 2 of 5,000:** Different random numbers → Different outcome  
+**...continue for all 5,000 runs...**
+
+**Results after 5,000 simulations:**
+```
+31-24: 3.2% (160 times)
+28-21: 2.9% (145 times)
+34-27: 2.7% (135 times)
+...
+
+P(Alabama covers -10.5) = 54.2%
+P(Over 54.5) = 48.1%
+```
+
+### Step 4: Calibration
+
+**Iteration 1:**
+```
+Error: Cover = 54.2% (target 50%), error = +4.2%
+Error: Over = 48.1% (target 50%), error = -1.9%
+
+Adjustments needed:
+  - Reduce probabilities of favorite-heavy scores
+  - Increase probabilities of high-scoring games
+```
+
+**Adjusting Q1 score 14-0:**
+```
+Current: 8.9%
+total_responsibility = (14+0-13.5)/13.5 = +0.037 (slightly high-scoring)
+margin_responsibility = (14-0-2.6)/2.6 = +4.38 (very favorite-heavy)
+
+total_factor = 1.0 + 0.12×(-1.9%)×(+0.037) = 1.0 - 0.0084 = 0.992
+margin_factor = 1.0 + 0.12×(+4.2%)×(+4.38) = 1.0 + 0.022 = 1.022
+
+new_prob = 8.9% × 0.992 × 1.022 = 9.0%
+
+Wait, that increased it! But total_factor reduced it by 0.8% and margin_factor 
+would increase by 2.2%, net = +1.4%... Actually this is wrong because 
+spread_error is +4.2% meaning we're covering TOO MUCH, so we need to 
+REDUCE favorite-heavy scores.
+
+Let me recalculate:
+spread_error = 0.50 - 0.542 = -0.042 (negative because covering too much)
+
+margin_factor = 1.0 + 0.12×(-0.042)×(+4.38) = 1.0 - 0.022 = 0.978
+
+new_prob = 8.9% × 0.992 × 0.978 = 8.6%
+```
+
+**After adjusting all quarters and re-simulating:**
+```
+Iteration 2: Cover=52.1%, Over=49.5%
+Iteration 3: Cover=50.7%, Over=50.2%
+Iteration 4: Cover=50.2%, Over=50.0%
+✓ Converged!
+```
+
+### Step 5: Final Output
+
+**Q1 predictions (calibrated):**
+```
+7-0   → 10.1%
+14-0  → 8.4%  (reduced from 8.9% due to calibration)
+7-7   → 6.5%  (increased slightly)
+3-0   → 4.2%
+0-0   → 4.0%
+```
+
+**Full game predictions (after 5,000 simulations with correlation):**
+```
+31-24 → 3.1%  (Alabama by 7, total 55)
+28-21 → 2.8%  (Alabama by 7, total 49)
+34-27 → 2.6%  (Alabama by 7, total 61)
+38-24 → 2.5%  (Alabama by 14, total 62)
+28-17 → 2.4%  (Alabama by 11, total 45)
+```
+
+**Market checks:**
+```
+P(Alabama -10.5) = 50.1% ✓
+P(Over 54.5) = 50.0% ✓
+```
 
 ---
 
 ## Key Takeaways
 
-### Why Orthogonal Features?
+### Why Orthogonal Features Matter
 
-**Problem with raw features:**
-```
-spread and total are correlated → unstable coefficients
-Hard to interpret: "Does total affect this score, or is it just correlated spread?"
-```
+**Problem:** Spread and total are correlated (r ≈ -0.3)  
+**Solution:** Transform to uncorrelated features
+- feature_total: Overall scoring level
+- feature_margin: Game lopsidedness
 
-**Solution with orthogonal features:**
-```
-feature_total and feature_margin are uncorrelated → stable coefficients
-Clear interpretation:
-  - feature_total controls overall scoring level
-  - feature_margin controls expected margin
-```
+**Benefit:** Stable, interpretable coefficients
 
-### Why Two-Tier Architecture?
+### Why Two-Tier Modeling Works
 
-**Common scores:** Enough data for individual models → precise predictions
+**Anchor scores (≥50 games):** Individual models with reliable estimates  
+**Rare scores (<50 games):** Bucket models that borrow information
 
-**Rare scores:** Not enough data for stable individual models → group into buckets
-- Borrow information from similar scores
-- Maintain individual score identities via proportional distribution
-- Avoid overfitting on sparse data
+**Benefit:** Handles data sparsity without overfitting
 
-### Why Elastic Net Regularization?
+### Why Correlation Matters
 
-**L1 component (30%):**
-- Performs feature selection
-- Can zero out irrelevant features
-- Creates sparse models
+**Independence assumption:** P(game) = P(Q1) × P(Q2) × P(Q3) × P(Q4)  
+**Reality:** Quarters are correlated (r ≈ 0.15)
 
-**L2 component (70%):**
-- Smooth shrinkage toward prior
-- Prevents extreme coefficients
-- Better for correlated features (though ours aren't!)
+**Our approach:** P(game) = P(Q1) × P(Q2|Q1) × P(Q3|H1) × P(Q4|H1,Q3)
 
-**Adaptive strength:**
-- Rare scores → strong regularization → stay near baseline
-- Common scores → weak regularization → learn from data
+**Benefit:** Captures realistic game flow
 
-### Model Properties
+### Why Monte Carlo Simulation
 
-**Interpretability:**
-- Each coefficient has clear meaning
-- Logical constraints ensure sensible predictions
-- Easy to debug individual scores
+**Alternative:** Multiply all combinations (7,000 Q1 scores × 7,000 Q2 scores × ...)  
+**Problem:** Computationally impossible and can't model conditional dependence
 
-**Robustness:**
-- Regularization prevents overfitting
-- Bucket models handle sparse data
-- Normalization ensures valid distribution
+**Monte Carlo:** Sample representative outcomes, count frequencies
 
-**Flexibility:**
-- Can add new features easily
-- Per-score customization possible
-- Extensible to other quarters
+**Benefit:** Fast, accurate, handles correlations naturally
+
+### Why Calibration Is Essential
+
+**Problem:** Quarter models trained independently may not combine to match Vegas  
+**Solution:** Iteratively adjust quarter distributions
+
+**Method:** Proportional responsibility-weighted updates  
+**Benefit:** Final distribution matches market while maintaining realistic quarters
 
 ### Current Limitations
 
-**Features:**
-- No coaching tendency information
-- No first possession data
-- No weather/injuries/context
-
-**Model:**
-- Independence assumption (ignores score correlations)
-- Linear effects only (no interactions)
-- Only predicts Q1 (not sequential quarters)
-
-**Data:**
-- Limited to FBS games
-- Requires pregame betting lines
-- Historical data may not reflect current trends
+**Not modeled:**
+- First possession (who gets ball in Q1 and Q3)
+- Coaching tendencies (aggressive vs conservative)
+- Weather conditions
+- Injuries or lineup changes
+- Pace of play differences
 
 ---
 
 ## Mathematical Notation Reference
 
-| Symbol | Meaning |
-|--------|---------|
-| `P(A)` | Probability of event A |
-| `P(A\|B)` | Probability of A given B |
-| `log(x)` | Natural logarithm |
-| `exp(x)` | Exponential (e^x) |
-| `sigmoid(x)` | 1 / (1 + exp(-x)) |
-| `logit(p)` | log(p / (1-p)) |
-| `β` | Regression coefficient |
-| `α` | Regularization strength |
-| `Σ` | Summation |
-| `\|x\|` | Absolute value |
+| Symbol | Meaning | Example |
+|--------|---------|---------|
+| P(A) | Probability of A | P(rain) = 30% |
+| P(A\|B) | Probability of A given B | P(Q2=7-0\|Q1=7-0) = 12% |
+| r | Correlation coefficient | r = 0.15 |
+| β | Regression coefficient | β₁ = 0.83 |
+| e | Euler's number | e ≈ 2.718 |
+| exp(x) | e raised to power x | exp(2) ≈ 7.389 |
+| log(x) | Natural logarithm | log(e) = 1 |
+| sigmoid(x) | 1 / (1 + e^(-x)) | sigmoid(0) = 0.5 |
+| Σ | Summation | Σ(1,2,3) = 6 |
+| \|x\| | Absolute value | \|-5\| = 5 |
 
 ---
 
 ## Glossary
 
-**Binary Classification:** Predicting one of two outcomes (yes/no, this score/not this score)
+**Anchor Score:** A score that appears frequently enough (≥50 times) to warrant its own individual model
 
-**Elastic Net:** Regularization combining L1 (Lasso) and L2 (Ridge) penalties
+**Bayesian Updating:** Adjusting probabilities based on new information (e.g., what happened in Q1)
 
-**Empirical Distribution:** Probability distribution from observed frequencies
+**Calibration:** Adjusting model outputs to match known benchmarks (Vegas lines)
 
-**Feature Engineering:** Transforming raw inputs into useful model features
+**Conditional Probability:** P(A|B) - probability of A happening given that B already happened
 
-**Logistic Regression:** Model for binary outcomes using logit link function
+**Correlation:** Statistical relationship between two variables (r between -1 and +1)
 
-**Multicollinearity:** High correlation between predictor variables causing unstable estimates
+**Empirical Distribution:** Probability distribution derived from observed historical frequencies
 
-**One-vs-All:** Training separate binary models for each class
+**Feature Engineering:** Transforming raw inputs into more useful predictive features
 
-**Orthogonal:** Mathematically independent (zero correlation)
+**Logistic Regression:** Statistical model for predicting binary outcomes using a sigmoid function
 
-**Regularization:** Penalty preventing extreme coefficient values and overfitting
+**Monte Carlo Simulation:** Running many random trials to estimate probability distributions
 
-**Sigmoid:** Function mapping any number to probability between 0 and 1
+**Multicollinearity:** When predictor variables are correlated, causing unstable estimates
+
+**Orthogonal:** Mathematically independent (correlation = 0)
+
+**Regularization:** Constraining model parameters to prevent overfitting
+
+**Responsibility:** How much a particular outcome contributes to prediction error
+
+**Sigmoid Function:** S-shaped curve that maps any number to a probability (0-1)
 
 ---
-
-*This methodology reflects the current model implementation. Future versions may incorporate additional features, alternative architectures, or improved calibration methods.*

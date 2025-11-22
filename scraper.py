@@ -1,699 +1,568 @@
+import os
+import sys
 import mysql.connector
-import cfbd
-from cfbd.models.division_classification import DivisionClassification
-from cfbd.models.season_type import SeasonType
-import requests
-import pandas as pd
+from mysql.connector import Error
 from datetime import datetime, timedelta
 import time
-import os
 from dotenv import load_dotenv
-from typing import Dict, List, Tuple, Optional
-import warnings
-warnings.filterwarnings('ignore')
+import cfbd
+import pandas as pd
 
-class CFBDataUpdater:
-    """
-    Updates CFB games and quarter scoring data from College Football Data API
-    
-    This class handles:
-    1. Fetching completed FBS games with scores and betting lines
-    2. Storing game data in cfb.games table
-    3. Storing quarter-by-quarter scoring in cfb.quarter_scoring table
-    4. Managing incremental updates to avoid duplicating data
-    5. Handling API rate limits and error recovery
-    """
-    
-    def __init__(self, api_key: str, db_config: Dict):
-        """
-        Initialize with CFBD API key and MySQL database configuration
-        
-        Args:
-            api_key: College Football Data API key from https://collegefootballdata.com
-            db_config: MySQL connection parameters
-                      Example: {'host': '127.0.0.1', 'user': 'root', 'password': '', 'database': 'cfb'}
-        """
-        self.api_key = api_key
-        self.db_config = db_config
-        
-        # Initialize CFBD API client with proper authentication
-        # Using the same method as your working scripts
-        self.configuration = cfbd.Configuration(access_token=api_key)
-        self.api_client = cfbd.ApiClient(self.configuration)
-        self.games_api = cfbd.GamesApi(self.api_client)
-        self.betting_api = cfbd.BettingApi(self.api_client)
-        
-        # Track API calls for rate limiting
-        self.api_calls_made = 0
-        self.last_api_call_time = time.time()
-        
-        # Connect to database
-        self.connect_to_database()
-        
-        # Test API connection immediately after initialization
-        print("Testing API connection...")
-        if not self.test_api_connection():
-            raise Exception("API authentication failed - please check your API key")
-    
-    def test_api_connection(self):
-        """
-        Test API connection with a simple request to verify authentication
-        """
-        try:
-            # Try a simple API call to test authentication
-            test_games = self.games_api.get_games(year=2024, week=1)
-            print(f"API connection successful! Found {len(test_games) if test_games else 0} games in test call")
-            return True
-        except Exception as e:
-            print(f"API connection failed: {e}")
-            return False
-    
-    def connect_to_database(self):
-        """
-        Establish MySQL database connection and verify table structures
-        """
-        try:
-            self.connection = mysql.connector.connect(**self.db_config)
-            self.cursor = self.connection.cursor()
-            print("Successfully connected to MySQL database")
-            
-            # Verify required tables exist
-            self.verify_table_structure()
-            
-        except mysql.connector.Error as err:
-            print(f"Database connection error: {err}")
-            raise
-    
-    def verify_table_structure(self):
-        """
-        Check if required tables exist and have proper structure
-        Creates tables if they don't exist
-        """
-        print("Verifying database table structure...")
-        
-        # Check cfb.games table
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS games (
-                game_id INT PRIMARY KEY,
-                season INT NOT NULL,
-                week INT NOT NULL,
-                home_team VARCHAR(100) NOT NULL,
-                away_team VARCHAR(100) NOT NULL,
-                home_points INT,
-                away_points INT,
-                neutral_site TINYINT(1) DEFAULT 0,
-                conference_game TINYINT(1) DEFAULT 0,
-                start_date DATETIME,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                home_classification VARCHAR(10),
-                away_classification VARCHAR(10),
-                pregame_spread FLOAT,
-                pregame_total FLOAT,
-                home_ml_prob FLOAT,
-                away_ml_prob FLOAT,
-                betting_provider VARCHAR(50),
-                INDEX idx_season_week (season, week),
-                INDEX idx_game_id (game_id)
-            )
-        """)
-        
-        # Check cfb.quarter_scoring table
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS quarter_scoring (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                game_id INT NOT NULL,
-                quarter INT NOT NULL,
-                home_score INT NOT NULL,
-                away_score INT NOT NULL,
-                total_score INT GENERATED ALWAYS AS (home_score + away_score) STORED,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY unique_game_quarter (game_id, quarter),
-                INDEX idx_game_id (game_id)
-            )
-        """)
-        
-        self.connection.commit()
-        print("Database tables verified/created successfully")
-    
-    def rate_limit_check(self):
-        """
-        Implement API rate limiting to respect CFBD limits
-        CFBD API allows 200 calls per minute
-        """
-        current_time = time.time()
-        time_since_last_call = current_time - self.last_api_call_time
-        
-        # Reset counter every minute
-        if time_since_last_call > 60:
-            self.api_calls_made = 0
-            self.last_api_call_time = current_time
-        
-        # If approaching rate limit, wait
-        if self.api_calls_made >= 180:  # Conservative limit
-            wait_time = 60 - time_since_last_call
-            if wait_time > 0:
-                print(f"Rate limit approaching, waiting {wait_time:.1f} seconds...")
-                time.sleep(wait_time)
-                self.api_calls_made = 0
-                self.last_api_call_time = time.time()
-        
-        self.api_calls_made += 1
-    
-    def is_fbs_team(self, team_name: str, conference: str = None) -> bool:
-        """
-        Determine if a team is FBS based on team name and conference
-        """
-        fbs_conferences = {
-            'SEC', 'Big Ten', 'Big 12', 'ACC', 'Pac-12', 'Pac-10',
-            'American Athletic', 'American', 'AAC',
-            'Conference USA', 'C-USA', 'CUSA',
-            'Mid-American', 'MAC',
-            'Mountain West', 'MWC',
-            'Sun Belt',
-            'FBS Independents', 'Independent'
-        }
-        
-        if conference:
-            for fbs_conf in fbs_conferences:
-                if fbs_conf.lower() in conference.lower():
-                    return True
-        
-        fbs_teams = {
-            'Notre Dame', 'Army', 'Navy', 'BYU', 'Liberty', 'New Mexico State',
-            'UConn', 'UMass'
-        }
-        
-        return team_name in fbs_teams
-    
-    def get_existing_games(self, season: int, week: int = None) -> set:
-        """Get set of game_ids that already exist in database"""
-        if week is not None:
-            self.cursor.execute("""
-                SELECT game_id FROM games 
-                WHERE season = %s AND week = %s
-            """, (season, week))
-        else:
-            self.cursor.execute("""
-                SELECT game_id FROM games 
-                WHERE season = %s
-            """, (season,))
-        
-        existing_games = {row[0] for row in self.cursor.fetchall()}
-        return existing_games
-    
-    def backfill_historical_seasons(self, start_season: int, end_season: int):
-        """
-        Backfill historical data for seasons that don't exist in database.
-        Used to populate 2014-2017 data.
-        
-        Args:
-            start_season: First season to backfill (e.g., 2014)
-            end_season: Last season to backfill (e.g., 2017)
-        """
-        print("="*60)
-        print(f"BACKFILLING HISTORICAL DATA: {start_season}-{end_season}")
-        print("="*60)
-        
-        for season in range(start_season, end_season + 1):
-            print(f"\n{'='*60}")
-            print(f"Processing {season} season...")
-            print(f"{'='*60}")
-            
-            # Check if we already have data for this season
-            self.cursor.execute("""
-                SELECT COUNT(*) FROM games WHERE season = %s
-            """, (season,))
-            existing_count = self.cursor.fetchone()[0]
-            
-            print(f"Existing games in database for {season}: {existing_count}")
-            
-            # If we already have substantial data, skip
-            if existing_count > 500:
-                print(f"Season {season} already has {existing_count} games, skipping...")
-                continue
-            
-            # For historical seasons, process all weeks
-            # Regular season is typically weeks 1-15, plus week 0 for some early games
-            weeks_to_process = list(range(0, 16))
-            
-            games_added = 0
-            
-            for week in weeks_to_process:
-                try:
-                    print(f"\nProcessing {season} Week {week}...")
-                    
-                    # Fetch games for this week
-                    games = self.fetch_games_for_week(season, week)
-                    
-                    if not games:
-                        continue
-                    
-                    # Fetch betting lines
-                    betting_data = self.fetch_betting_lines(season, week)
-                    
-                    # Store each game
-                    for game_data in games:
-                        try:
-                            self.store_game_data(game_data, betting_data)
-                            games_added += 1
-                        except Exception as e:
-                            print(f"    Error storing game {game_data.get('game_id')}: {e}")
-                            continue
-                    
-                    # Commit after each week
-                    self.connection.commit()
-                    print(f"  Week {week}: {len(games)} games processed, {games_added} total added")
-                    
-                    # Small delay to be respectful of API rate limits
-                    time.sleep(1)
-                    
-                except Exception as e:
-                    print(f"  Error processing {season} week {week}: {e}")
-                    continue
-            
-            print(f"\n{season} Season Complete:")
-            print(f"  Total games added: {games_added}")
-            
-            # Verify season data
-            self.cursor.execute("""
-                SELECT 
-                    COUNT(*) as total_games,
-                    SUM(CASE WHEN pregame_spread IS NOT NULL THEN 1 ELSE 0 END) as with_spread,
-                    SUM(CASE WHEN pregame_total IS NOT NULL THEN 1 ELSE 0 END) as with_total
-                FROM games 
-                WHERE season = %s
-            """, (season,))
-            
-            result = self.cursor.fetchone()
-            print(f"  Verification - Total: {result[0]}, With Spread: {result[1]}, With Total: {result[2]}")
-        
-        print("\n" + "="*60)
-        print("HISTORICAL BACKFILL COMPLETE")
-        print("="*60)
-    def moneyline_to_probability(self, home_ml: Optional[float], away_ml: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
-        """Convert American moneyline odds to implied probabilities"""
-        if not home_ml or not away_ml:
-            return None, None
-        
-        try:
-            if home_ml > 0:
-                home_implied = 100 / (home_ml + 100)
-            else:
-                home_implied = abs(home_ml) / (abs(home_ml) + 100)
-            
-            if away_ml > 0:
-                away_implied = 100 / (away_ml + 100)
-            else:
-                away_implied = abs(away_ml) / (abs(away_ml) + 100)
-            
-            total_implied = home_implied + away_implied
-            if total_implied > 0:
-                home_prob = home_implied / total_implied
-                away_prob = away_implied / total_implied
-                return home_prob, away_prob
-            else:
-                return None, None
-                
-        except (ValueError, ZeroDivisionError):
-            return None, None
-    
-    def fetch_betting_lines(self, season: int, week: int) -> Dict[int, Dict]:
-        """Fetch betting lines for a specific season and week"""
-        self.rate_limit_check()
-        
-        try:
-            print(f"  Fetching betting lines for {season} week {week}...")
-            
-            betting_lines = self.betting_api.get_lines(
-                year=season,
-                week=week,
-                season_type=SeasonType.REGULAR
-            )
-            
-            betting_data = {}
-            
-            if betting_lines:
-                for bet_game in betting_lines:
-                    if hasattr(bet_game, 'id') and bet_game.lines:
-                        best_line = None
-                        preferred_providers = ['consensus', 'Bovada', 'DraftKings', 'FanDuel', 'ESPN BET']
-                        
-                        for provider in preferred_providers:
-                            for line in bet_game.lines:
-                                if hasattr(line, 'provider') and line.provider == provider:
-                                    best_line = line
-                                    break
-                            if best_line:
-                                break
-                        
-                        if not best_line and bet_game.lines:
-                            best_line = bet_game.lines[0]
-                        
-                        if best_line:
-                            spread = getattr(best_line, 'spread', None)
-                            total = getattr(best_line, 'over_under', None)
-                            home_ml = getattr(best_line, 'home_moneyline', None)
-                            away_ml = getattr(best_line, 'away_moneyline', None)
-                            provider = getattr(best_line, 'provider', 'Unknown')
-                            
-                            home_ml_prob, away_ml_prob = self.moneyline_to_probability(home_ml, away_ml)
-                            
-                            betting_data[bet_game.id] = {
-                                'spread': spread,
-                                'total': total,
-                                'home_ml_prob': home_ml_prob,
-                                'away_ml_prob': away_ml_prob,
-                                'provider': provider
-                            }
-            
-            print(f"  Found betting lines for {len(betting_data)} games")
-            return betting_data
-            
-        except Exception as e:
-            print(f"  Error fetching betting lines: {e}")
-            return {}
-    
-    def fetch_games_for_week(self, season: int, week: int) -> List[Dict]:
-        """Fetch completed games for a specific season and week"""
-        self.rate_limit_check()
-        
-        try:
-            print(f"Fetching games for {season} week {week}...")
-            
-            games = self.games_api.get_games(
-                year=season,
-                week=week,
-                season_type=SeasonType.REGULAR,
-                classification=DivisionClassification.FBS
-            )
-            
-            completed_games = []
-            
-            for game in games:
-                if (hasattr(game, 'home_points') and hasattr(game, 'away_points') and 
-                    game.home_points is not None and game.away_points is not None):
-                    
-                    game_data = {
-                        'game_id': game.id,
-                        'season': game.season,
-                        'week': game.week,
-                        'home_team': game.home_team,
-                        'away_team': game.away_team,
-                        'home_points': game.home_points,
-                        'away_points': game.away_points,
-                        'neutral_site': getattr(game, 'neutral_site', False),
-                        'conference_game': getattr(game, 'conference_game', False),
-                        'start_date': getattr(game, 'start_date', None),
-                        'home_conference': getattr(game, 'home_conference', None),
-                        'away_conference': getattr(game, 'away_conference', None)
-                    }
-                    
-                    home_is_fbs = self.is_fbs_team(game.home_team, game_data['home_conference'])
-                    away_is_fbs = self.is_fbs_team(game.away_team, game_data['away_conference'])
-                    
-                    game_data['home_classification'] = 'fbs' if home_is_fbs else 'fcs'
-                    game_data['away_classification'] = 'fbs' if away_is_fbs else 'fcs'
-                    
-                    if home_is_fbs or away_is_fbs:
-                        quarter_scores = []
-                        if (hasattr(game, 'home_line_scores') and hasattr(game, 'away_line_scores') and
-                            game.home_line_scores and game.away_line_scores):
-                            
-                            for quarter, (home_q, away_q) in enumerate(zip(game.home_line_scores, game.away_line_scores), 1):
-                                if quarter <= 4:
-                                    quarter_scores.append({
-                                        'quarter': quarter,
-                                        'home_score': int(home_q),
-                                        'away_score': int(away_q)
-                                    })
-                        
-                        game_data['quarter_scores'] = quarter_scores
-                        completed_games.append(game_data)
-            
-            print(f"  Found {len(completed_games)} completed FBS games")
-            return completed_games
-            
-        except Exception as e:
-            print(f"  Error fetching games: {e}")
-            return []
-    
-    def store_game_data(self, game_data: Dict, betting_data: Dict = None):
-        """Store game data and quarter scores in database"""
-        try:
-            spread = None
-            total = None
-            home_ml_prob = None
-            away_ml_prob = None
-            provider = None
-            
-            if betting_data and game_data['game_id'] in betting_data:
-                bet_info = betting_data[game_data['game_id']]
-                spread = bet_info.get('spread')
-                total = bet_info.get('total')
-                home_ml_prob = bet_info.get('home_ml_prob')
-                away_ml_prob = bet_info.get('away_ml_prob')
-                provider = bet_info.get('provider')
-            
-            self.cursor.execute("""
-                INSERT INTO games (
-                    game_id, season, week, home_team, away_team,
-                    home_points, away_points, neutral_site, conference_game, start_date,
-                    home_classification, away_classification,
-                    pregame_spread, pregame_total, home_ml_prob, away_ml_prob, betting_provider
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    home_points = VALUES(home_points),
-                    away_points = VALUES(away_points),
-                    home_classification = VALUES(home_classification),
-                    away_classification = VALUES(away_classification),
-                    pregame_spread = COALESCE(VALUES(pregame_spread), pregame_spread),
-                    pregame_total = COALESCE(VALUES(pregame_total), pregame_total),
-                    home_ml_prob = COALESCE(VALUES(home_ml_prob), home_ml_prob),
-                    away_ml_prob = COALESCE(VALUES(away_ml_prob), away_ml_prob),
-                    betting_provider = COALESCE(VALUES(betting_provider), betting_provider)
-            """, (
-                game_data['game_id'], game_data['season'], game_data['week'],
-                game_data['home_team'], game_data['away_team'],
-                game_data['home_points'], game_data['away_points'],
-                game_data['neutral_site'], game_data['conference_game'], game_data['start_date'],
-                game_data['home_classification'], game_data['away_classification'],
-                spread, total, home_ml_prob, away_ml_prob, provider
-            ))
-            
-            if game_data.get('quarter_scores'):
-                for quarter_data in game_data['quarter_scores']:
-                    self.cursor.execute("""
-                        INSERT INTO quarter_scoring (
-                            game_id, quarter, home_score, away_score
-                        ) VALUES (%s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE
-                            home_score = VALUES(home_score),
-                            away_score = VALUES(away_score)
-                    """, (
-                        game_data['game_id'],
-                        quarter_data['quarter'],
-                        quarter_data['home_score'],
-                        quarter_data['away_score']
-                    ))
-            
-        except mysql.connector.Error as err:
-            print(f"Database error storing game {game_data['game_id']}: {err}")
-            raise
-    
-    def update_season_data(self, season: int, specific_week: int = None):
-        """Update data for a complete season or specific week"""
-        print(f"Updating data for {season} season" + (f" week {specific_week}" if specific_week else ""))
-        
-        if specific_week is not None:
-            week_range = [specific_week]
-        else:
-            if season == 2025:
-                week_range = list(range(0, 6))
-            else:
-                week_range = list(range(1, 16))
-        
-        games_processed = 0
-        games_stored = 0
-        
-        for week in week_range:
-            try:
-                print(f"\nProcessing {season} Week {week}...")
-                
-                existing_games = self.get_existing_games(season, week)
-                games = self.fetch_games_for_week(season, week)
-                
-                if not games:
-                    print(f"  No completed games found for week {week}")
-                    continue
-                
-                betting_data = self.fetch_betting_lines(season, week)
-                
-                new_games = 0
-                for game_data in games:
-                    games_processed += 1
-                    
-                    if game_data['game_id'] not in existing_games:
-                        new_games += 1
-                    
-                    self.store_game_data(game_data, betting_data)
-                    games_stored += 1
-                
-                self.connection.commit()
-                print(f"  Week {week}: {len(games)} games found, {new_games} new games stored")
-                time.sleep(0.5)
-                
-            except Exception as e:
-                print(f"  Error processing week {week}: {e}")
-                continue
-        
-        print(f"\nSeason update complete:")
-        print(f"  Total games processed: {games_processed}")
-        print(f"  Total games stored/updated: {games_stored}")
-        print(f"  API calls made: {self.api_calls_made}")
-    
-    def update_current_season(self):
-        """Update data for current season (2025)"""
-        current_year = 2025
-        
-        print("Updating current season data...")
-        
-        # Get the maximum week already in database for current season
-        self.cursor.execute("""
-            SELECT MAX(week) FROM games 
-            WHERE season = %s
-        """, (current_year,))
-        
-        max_week_result = self.cursor.fetchone()
-        max_week_in_db = max_week_result[0] if max_week_result[0] is not None else -1
-        
-        print(f"Latest week in database: {max_week_in_db}")
-        
-        # Start from week after the latest one in database, up to week 16 (covers regular season + conference championship)
-        # If no data exists, start from week 0
-        start_week = 0 if max_week_in_db == -1 else max_week_in_db
-        max_week_to_check = 16
-        
-        weeks_to_update = list(range(start_week, max_week_to_check + 1))
-        print(f"Checking weeks: {weeks_to_update}")
-        
-        games_found = False
-        consecutive_empty_weeks = 0
-        
-        # Loop through weeks and stop after finding 3 consecutive weeks with no games
-        for week in weeks_to_update:
-            self.update_season_data(current_year, week)
-            
-            # Check if this week had any games
-            self.cursor.execute("""
-                SELECT COUNT(*) FROM games 
-                WHERE season = %s AND week = %s
-            """, (current_year, week))
-            
-            week_game_count = self.cursor.fetchone()[0]
-            
-            if week_game_count > 0:
-                games_found = True
-                consecutive_empty_weeks = 0
-            else:
-                consecutive_empty_weeks += 1
-                
-            # If we've hit 3 consecutive empty weeks after finding some games, stop checking
-            if games_found and consecutive_empty_weeks >= 3:
-                print(f"No games found for 3 consecutive weeks, stopping at week {week}")
-                break
-    
-    def close_connection(self):
-        """Close database connection"""
-        if self.connection:
-            self.connection.close()
-            print("Database connection closed")
-
+# Load environment variables
 load_dotenv()
 
-def main():
-    # Get API key from environment
-    API_KEY = os.getenv('CFBD_API_KEY')
-    
-    if not API_KEY:
-        raise ValueError("CFBD_API_KEY not found in environment variables")
-    
-    DB_CONFIG = {
-        'host': os.getenv('DB_HOST', '127.0.0.1'),
-        'port': int(os.getenv('DB_PORT', 3306)),
-        'user': os.getenv('DB_USER', 'root'),
-        'password': os.getenv('DB_PASSWORD', ''),
-        'database': os.getenv('DB_NAME', 'cfb')
-    }
-    
-    try:
-        print("Initializing CFB Data Updater...")
-        updater = CFBDataUpdater(API_KEY, DB_CONFIG)
-        
-        # Check if we need to backfill historical data
-        updater.cursor.execute("SELECT MIN(season) FROM games")
-        min_season_result = updater.cursor.fetchone()
-        min_season = min_season_result[0] if min_season_result[0] else 9999
-        
-        # If earliest season is 2018 or later, backfill 2014-2017
-        if min_season >= 2018:
-            print("\n" + "="*60)
-            print("DETECTED MISSING HISTORICAL DATA")
-            print(f"Current earliest season: {min_season}")
-            print("="*60)
-            
-            response = input("\nBackfill 2014-2017 data? This will take 10-15 minutes. (y/n): ")
-            
-            if response.lower() == 'y':
-                updater.backfill_historical_seasons(2014, 2017)
-            else:
-                print("Skipping historical backfill")
-        
-        # Update current season
-        print("\n" + "="*60)
-        print("UPDATING CURRENT SEASON")
-        print("="*60)
-        updater.update_current_season()
-        
-        print("\n" + "="*60)
-        print("UPDATE COMPLETE")
-        print("="*60)
-        
-        # Show summary statistics
-        updater.cursor.execute("SELECT COUNT(*) FROM games")
-        total_games = updater.cursor.fetchone()[0]
-        
-        updater.cursor.execute("SELECT COUNT(*) FROM quarter_scoring")
-        total_quarters = updater.cursor.fetchone()[0]
-        
-        updater.cursor.execute("""
-            SELECT COUNT(*) FROM games 
-            WHERE pregame_spread IS NOT NULL
-        """)
-        games_with_betting = updater.cursor.fetchone()[0]
-        
-        updater.cursor.execute("""
-            SELECT MIN(season), MAX(season) FROM games
-        """)
-        season_range = updater.cursor.fetchone()
-        
-        print(f"Database Summary:")
-        print(f"  Season range: {season_range[0]}-{season_range[1]}")
-        print(f"  Total games: {total_games:,}")
-        print(f"  Quarter records: {total_quarters:,}")
-        print(f"  Games with betting data: {games_with_betting:,}")
-        print(f"  Betting data coverage: {games_with_betting/max(total_games,1):.1%}")
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        
-    finally:
-        try:
-            updater.close_connection()
-        except:
-            pass
+# Database configuration
+DB_CONFIG = {
+    'host': os.getenv('DB_HOST'),
+    'database': os.getenv('DB_NAME'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD')
+}
 
+# CFBD API configuration
+CFBD_API_KEY = os.getenv('CFBD_API_KEY')
+
+def connect_to_database():
+    """
+    Establish connection to MySQL database
+    Returns connection object or None if failed
+    """
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        if conn.is_connected():
+            print("Successfully connected to database")
+            return conn
+    except Error as e:
+        print(f"Error connecting to database: {e}")
+        return None
+
+def get_cfbd_configuration():
+    """
+    Configure CFBD API client
+    Returns configured API client instances
+    """
+    configuration = cfbd.Configuration(access_token=CFBD_API_KEY)
+    api_client = cfbd.ApiClient(configuration)
+    games_api = cfbd.GamesApi(api_client)
+    betting_api = cfbd.BettingApi(api_client)
+    
+    return games_api, betting_api
+
+def cleanup_duplicate_quarter_records(cursor, conn):
+    """
+    Remove duplicate quarter_scoring records, keeping only the earliest created_at entry
+    for each unique (game_id, quarter) combination.
+    """
+    print("\n" + "="*80)
+    print("CLEANING UP DUPLICATE QUARTER RECORDS")
+    print("="*80)
+    
+    # Find duplicates
+    cursor.execute("""
+        SELECT game_id, quarter, COUNT(*) as cnt
+        FROM quarter_scoring
+        GROUP BY game_id, quarter
+        HAVING COUNT(*) > 1
+    """)
+    duplicates = cursor.fetchall()
+    
+    if not duplicates:
+        print("No duplicate records found")
+        return
+    
+    print(f"Found {len(duplicates)} duplicate (game_id, quarter) combinations")
+    
+    total_deleted = 0
+    
+    # For each duplicate, keep only the earliest record
+    for game_id, quarter, count in duplicates:
+        # Get all IDs for this game_id, quarter combination, ordered by created_at
+        cursor.execute("""
+            SELECT id
+            FROM quarter_scoring
+            WHERE game_id = %s AND quarter = %s
+            ORDER BY created_at ASC
+        """, (game_id, quarter))
+        
+        ids = [row[0] for row in cursor.fetchall()]
+        
+        # Keep the first (earliest) ID, delete the rest
+        ids_to_delete = ids[1:]
+        
+        if ids_to_delete:
+            placeholders = ','.join(['%s'] * len(ids_to_delete))
+            cursor.execute(f"""
+                DELETE FROM quarter_scoring
+                WHERE id IN ({placeholders})
+            """, ids_to_delete)
+            
+            deleted = cursor.rowcount
+            total_deleted += deleted
+    
+    conn.commit()
+    print(f"Deleted {total_deleted} duplicate records")
+    print("="*80 + "\n")
+
+def backfill_overtime_periods(cursor, conn):
+    """
+    Backfill period 5 (overtime) records for games that went to OT.
+    Fixes the calculation to properly compute OT scores.
+    """
+    print("\n" + "="*80)
+    print("BACKFILLING OVERTIME PERIODS")
+    print("="*80)
+    
+    # Find games where final score != sum of Q1-Q4 scores
+    cursor.execute("""
+        SELECT 
+            g.game_id,
+            g.home_team,
+            g.away_team,
+            g.home_points as final_home,
+            g.away_points as final_away,
+            COALESCE(SUM(CASE WHEN qs.quarter <= 4 THEN qs.home_score ELSE 0 END), 0) as reg_home,
+            COALESCE(SUM(CASE WHEN qs.quarter <= 4 THEN qs.away_score ELSE 0 END), 0) as reg_away
+        FROM cfb.games g
+        LEFT JOIN quarter_scoring qs ON g.game_id = qs.game_id
+        GROUP BY g.game_id, g.home_team, g.away_team, g.home_points, g.away_points
+        HAVING 
+            g.home_points != COALESCE(SUM(CASE WHEN qs.quarter <= 4 THEN qs.home_score ELSE 0 END), 0)
+            OR g.away_points != COALESCE(SUM(CASE WHEN qs.quarter <= 4 THEN qs.away_score ELSE 0 END), 0)
+    """)
+    
+    ot_games = cursor.fetchall()
+    print(f"Found {len(ot_games)} games with score discrepancies (potential OT)")
+    
+    records_added = 0
+    
+    for game_id, home_team, away_team, final_home, final_away, reg_home, reg_away in ot_games:
+        # Calculate OT scores: OT = Final - Regulation
+        ot_home = final_home - reg_home
+        ot_away = final_away - reg_away
+        ot_total = ot_home + ot_away
+        
+        # Validate that OT scores are positive (sanity check)
+        if ot_home < 0 or ot_away < 0:
+            print(f"  Skipping game {game_id}: Invalid OT calculation ({ot_home}, {ot_away})")
+            continue
+        
+        # Check if period 5 already exists
+        cursor.execute("""
+            SELECT COUNT(*) FROM quarter_scoring
+            WHERE game_id = %s AND quarter = 5
+        """, (game_id,))
+        
+        if cursor.fetchone()[0] > 0:
+            continue
+        
+        # Insert period 5 record
+        cursor.execute("""
+            INSERT INTO quarter_scoring (game_id, quarter, home_score, away_score, total_score, created_at)
+            VALUES (%s, 5, %s, %s, %s, NOW())
+        """, (game_id, ot_home, ot_away, ot_total))
+        
+        records_added += 1
+        print(f"  Game {game_id} ({home_team} vs {away_team}): Reg {reg_home}-{reg_away}, Final {final_home}-{final_away}, OT {ot_home}-{ot_away}")
+    
+    conn.commit()
+    
+    print("\n" + "="*80)
+    print(f"OVERTIME BACKFILL COMPLETE: {records_added} period 5 records added")
+    print("="*80 + "\n")
+
+def get_most_recent_game_date(cursor):
+    """
+    Get the most recent game date in the database
+    Returns datetime object or None
+    """
+    cursor.execute("""
+        SELECT start_date, season, week 
+        FROM cfb.games 
+        ORDER BY start_date DESC
+        LIMIT 1
+    """)
+    result = cursor.fetchone()
+    if result and result[0]:
+        return result[0], result[1], result[2]
+    return None, None, None
+
+def fetch_games_for_week(games_api, season, week):
+    """
+    Fetch all FBS games for a given season and week
+    Returns list of games
+    """
+    try:
+        games = games_api.get_games(
+            year=season,
+            week=week,
+            season_type='both',
+            classification='fbs'
+        )
+        return games
+    except Exception as e:
+        print(f"  Error fetching games: {e}")
+        return []
+
+def fetch_betting_lines(betting_api, season, week):
+    """
+    Fetch betting lines for a given season and week
+    Returns list of betting lines
+    """
+    try:
+        lines = betting_api.get_lines(
+            year=season,
+            week=week,
+            season_type='both'
+        )
+        return lines
+    except Exception as e:
+        print(f"  Error fetching betting lines: {e}")
+        return []
+
+def aggregate_betting_lines(lines):
+    """
+    Aggregate betting lines across providers, taking median values
+    Returns dict mapping game_id to betting data
+    """
+    game_lines = {}
+    
+    for line in lines:
+        game_id = line.id
+        
+        if game_id not in game_lines:
+            game_lines[game_id] = {
+                'spreads': [],
+                'totals': [],
+                'home_ml': [],
+                'away_ml': [],
+                'providers': []
+            }
+        
+        if line.lines:
+            for provider_line in line.lines:
+                game_lines[game_id]['providers'].append(provider_line.provider)
+                
+                if hasattr(provider_line, 'spread') and provider_line.spread:
+                    game_lines[game_id]['spreads'].append(float(provider_line.spread))
+                
+                if hasattr(provider_line, 'over_under') and provider_line.over_under:
+                    game_lines[game_id]['totals'].append(float(provider_line.over_under))
+                
+                if hasattr(provider_line, 'home_moneyline') and provider_line.home_moneyline:
+                    game_lines[game_id]['home_ml'].append(int(provider_line.home_moneyline))
+                
+                if hasattr(provider_line, 'away_moneyline') and provider_line.away_moneyline:
+                    game_lines[game_id]['away_ml'].append(int(provider_line.away_moneyline))
+    
+    # Calculate medians
+    aggregated = {}
+    for game_id, data in game_lines.items():
+        aggregated[game_id] = {
+            'spread': float(pd.Series(data['spreads']).median()) if data['spreads'] else None,
+            'total': float(pd.Series(data['totals']).median()) if data['totals'] else None,
+            'home_ml': float(pd.Series(data['home_ml']).median()) if data['home_ml'] else None,
+            'away_ml': float(pd.Series(data['away_ml']).median()) if data['away_ml'] else None,
+            'provider': 'Aggregated'
+        }
+        
+        # Convert moneylines to probabilities
+        if aggregated[game_id]['home_ml'] is not None:
+            home_ml = aggregated[game_id]['home_ml']
+            if home_ml < 0:
+                aggregated[game_id]['home_ml_prob'] = abs(home_ml) / (abs(home_ml) + 100)
+            else:
+                aggregated[game_id]['home_ml_prob'] = 100 / (home_ml + 100)
+        else:
+            aggregated[game_id]['home_ml_prob'] = None
+        
+        if aggregated[game_id]['away_ml'] is not None:
+            away_ml = aggregated[game_id]['away_ml']
+            if away_ml < 0:
+                aggregated[game_id]['away_ml_prob'] = abs(away_ml) / (abs(away_ml) + 100)
+            else:
+                aggregated[game_id]['away_ml_prob'] = 100 / (away_ml + 100)
+        else:
+            aggregated[game_id]['away_ml_prob'] = None
+    
+    return aggregated
+
+def game_exists(cursor, game_id):
+    """
+    Check if a game already exists in the database
+    Returns True if exists, False otherwise
+    """
+    cursor.execute("SELECT COUNT(*) FROM cfb.games WHERE game_id = %s", (game_id,))
+    return cursor.fetchone()[0] > 0
+
+def insert_game(cursor, game, betting_data):
+    """
+    Insert a game into the cfb.games table
+    """
+    spread = betting_data.get('spread') if betting_data else None
+    total = betting_data.get('total') if betting_data else None
+    home_ml_prob = betting_data.get('home_ml_prob') if betting_data else None
+    away_ml_prob = betting_data.get('away_ml_prob') if betting_data else None
+    provider = betting_data.get('provider') if betting_data else None
+    
+    cursor.execute("""
+        INSERT INTO cfb.games 
+        (game_id, season, week, home_team, away_team, home_points, away_points, 
+         neutral_site, conference_game, start_date, created_at, home_classification, 
+         away_classification, pregame_spread, pregame_total, home_ml_prob, 
+         away_ml_prob, betting_provider)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        game.id,
+        game.season,
+        game.week,
+        game.home_team,
+        game.away_team,
+        game.home_points or 0,
+        game.away_points or 0,
+        1 if game.neutral_site else 0,
+        1 if game.conference_game else 0,
+        game.start_date,
+        game.home_classification or 'fbs',
+        game.away_classification or 'fbs',
+        spread,
+        total,
+        home_ml_prob,
+        away_ml_prob,
+        provider
+    ))
+
+def fetch_quarter_scores(games_api, game_id):
+    """
+    Fetch quarter scores for a specific game
+    Returns list of quarter scores
+    """
+    try:
+        team_stats = games_api.get_team_game_stats(game_id=game_id)
+        
+        quarter_scores = {}
+        
+        for team_stat in team_stats:
+            team = team_stat.school
+            
+            for stat in team_stat.stats:
+                if stat.category == 'quarters':
+                    quarters = stat.stat.split(',')
+                    
+                    for i, quarter_score in enumerate(quarters, start=1):
+                        if i not in quarter_scores:
+                            quarter_scores[i] = {'home': 0, 'away': 0}
+                        
+                        score = int(quarter_score.strip()) if quarter_score.strip() else 0
+                        
+                        if team == team_stats[0].school:
+                            quarter_scores[i]['home'] = score
+                        else:
+                            quarter_scores[i]['away'] = score
+        
+        return quarter_scores
+    
+    except Exception as e:
+        print(f"  Error fetching quarter scores for game {game_id}: {e}")
+        return {}
+
+def insert_quarter_scores(cursor, game_id, quarter_scores):
+    """
+    Insert quarter scores into quarter_scoring table
+    """
+    for quarter, scores in quarter_scores.items():
+        if quarter > 4:
+            continue
+        
+        # Check if already exists
+        cursor.execute("""
+            SELECT COUNT(*) FROM quarter_scoring 
+            WHERE game_id = %s AND quarter = %s
+        """, (game_id, quarter))
+        
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("""
+                INSERT INTO quarter_scoring 
+                (game_id, quarter, home_score, away_score, total_score, created_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+            """, (
+                game_id,
+                quarter,
+                scores['home'],
+                scores['away'],
+                scores['home'] + scores['away']
+            ))
+
+def run_incremental_update(cursor, conn, games_api, betting_api):
+    """
+    Run incremental update to fetch missing games
+    """
+    print("\n" + "="*80)
+    print("INCREMENTAL UPDATE - FINDING MISSING GAMES")
+    print("="*80)
+    
+    # Get most recent game in database
+    most_recent_date, most_recent_season, most_recent_week = get_most_recent_game_date(cursor)
+    
+    if most_recent_date:
+        print(f"Most recent game in database: {most_recent_date} (Season {most_recent_season}, Week {most_recent_week})")
+    else:
+        print("No games found in database, starting from 2014")
+        most_recent_season = 2014
+        most_recent_week = 1
+    
+    # Determine current date and season
+    current_date = datetime.now()
+    current_year = current_date.year
+    
+    # Determine if we're in football season (August-January)
+    if current_date.month >= 8:
+        current_season = current_year
+    else:
+        current_season = current_year - 1
+    
+    print(f"Current date: {current_date.strftime('%Y-%m-%d')}")
+    
+    # Calculate weeks to check (from most recent to current + buffer)
+    weeks_to_check = []
+    
+    if most_recent_season == current_season:
+        # Same season - check from most recent week to current week + 5
+        for week in range(most_recent_week, min(most_recent_week + 20, 21)):
+            weeks_to_check.append((most_recent_season, week))
+    else:
+        # Different seasons - need to check multiple seasons
+        for season in range(most_recent_season, current_season + 1):
+            if season == most_recent_season:
+                start_week = most_recent_week
+            else:
+                start_week = 1
+            
+            for week in range(start_week, 21):
+                weeks_to_check.append((season, week))
+    
+    print(f"Will check {len(weeks_to_check)} season-week combinations from {weeks_to_check[0][0]} to {weeks_to_check[-1][0]}")
+    
+    total_new_games = 0
+    total_quarter_records = 0
+    
+    for season, week in weeks_to_check:
+        print(f"\nChecking {season} Week {week}...")
+        
+        # Fetch games
+        games = fetch_games_for_week(games_api, season, week)
+        
+        if not games:
+            continue
+        
+        print(f"  Found {len(games)} FBS games for {season} Week {week}")
+        
+        # Fetch betting lines
+        betting_lines = fetch_betting_lines(betting_api, season, week)
+        aggregated_lines = aggregate_betting_lines(betting_lines)
+        
+        print(f"  Found betting lines for {len(aggregated_lines)} games (median across providers)")
+        
+        # Check which games are new
+        new_games = []
+        for game in games:
+            if not game_exists(cursor, game.id):
+                new_games.append(game)
+        
+        if not new_games:
+            print(f"  All {len(games)} games already in database")
+            continue
+        
+        print(f"  Found {len(new_games)} new games to add")
+        
+        # Insert new games
+        for game in new_games:
+            betting_data = aggregated_lines.get(game.id)
+            insert_game(cursor, game, betting_data)
+            
+            # Fetch and insert quarter scores if game is complete
+            if game.home_points is not None and game.away_points is not None:
+                quarter_scores = fetch_quarter_scores(games_api, game.id)
+                if quarter_scores:
+                    insert_quarter_scores(cursor, game.id, quarter_scores)
+                    total_quarter_records += len(quarter_scores)
+                
+                # Small delay to avoid rate limiting
+                time.sleep(0.1)
+        
+        conn.commit()
+        total_new_games += len(new_games)
+        
+        # Delay between weeks
+        time.sleep(0.5)
+    
+    print("\n" + "="*80)
+    print("INCREMENTAL UPDATE COMPLETE")
+    print("="*80)
+    print(f"New games added: {total_new_games}")
+    print(f"Quarter records added: {total_quarter_records}")
+    print("="*80 + "\n")
+
+def print_database_summary(cursor):
+    """
+    Print summary statistics about the database
+    """
+    # Date range
+    cursor.execute("SELECT MIN(start_date), MAX(start_date) FROM cfb.games")
+    min_date, max_date = cursor.fetchone()
+    
+    # Total games
+    cursor.execute("SELECT COUNT(*) FROM cfb.games")
+    total_games = cursor.fetchone()[0]
+    
+    # Quarter records
+    cursor.execute("SELECT COUNT(*) FROM quarter_scoring")
+    quarter_records = cursor.fetchone()[0]
+    
+    # Overtime periods
+    cursor.execute("SELECT COUNT(*) FROM quarter_scoring WHERE quarter = 5")
+    ot_periods = cursor.fetchone()[0]
+    
+    # Games with betting data
+    cursor.execute("SELECT COUNT(*) FROM cfb.games WHERE pregame_spread IS NOT NULL")
+    games_with_betting = cursor.fetchone()[0]
+    
+    print("Database Summary:")
+    print(f"  Date range: {min_date} to {max_date}")
+    print(f"  Total games: {total_games:,}")
+    print(f"  Quarter records: {quarter_records:,}")
+    print(f"  Overtime periods (period 5): {ot_periods}")
+    print(f"  Games with betting data: {games_with_betting:,}")
+
+def main():
+    """
+    Main execution function
+    """
+    # Connect to database
+    conn = connect_to_database()
+    if not conn:
+        sys.exit(1)
+    
+    cursor = conn.cursor()
+    
+    # Configure CFBD API
+    games_api, betting_api = get_cfbd_configuration()
+    
+    # STEP 1: Clean up any duplicate quarter records
+    cleanup_duplicate_quarter_records(cursor, conn)
+    
+    # STEP 2: Backfill overtime periods
+    backfill_overtime_periods(cursor, conn)
+    
+    # STEP 3: Run incremental update to fetch new games
+    run_incremental_update(cursor, conn, games_api, betting_api)
+    
+    # Print summary
+    print_database_summary(cursor)
+    
+    # Close connection
+    cursor.close()
+    conn.close()
+    print("Database connection closed")
 
 if __name__ == "__main__":
     main()

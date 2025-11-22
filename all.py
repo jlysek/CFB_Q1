@@ -5,18 +5,18 @@ import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
 from scipy.interpolate import UnivariateSpline
+from scipy.special import expit
 import warnings
 warnings.filterwarnings('ignore')
 
 class CFBAllQuartersPredictor:
     """
-    Predicts all four quarter score probabilities with proper calibration and correlation modeling.
-    
-    Key improvements:
-    - True calibration: adjusts quarter distributions proportionally
-    - Percentage-based anchor threshold with floor
-    - Bayesian quarter correlation: P(Q2|Q1), P(Q3|Q1,Q2), P(Q4|Q1,Q2,Q3)
-    - Conditional probability models learned from historical data
+    Predicts all four quarter score probabilities with:
+    - Bayesian credibility weighting for correlations
+    - Enhanced halftime differential modeling for Q3/Q4
+    - Logit-space calibration for better distribution shape preservation
+    - Smooth garbage time detection for Q4
+    - Laplace smoothing for credibility weighting
     """
     
     def __init__(self, db_config):
@@ -44,12 +44,23 @@ class CFBAllQuartersPredictor:
         self.anchor_scores_q3 = []
         self.anchor_scores_q4 = []
         
-        # NEW: Conditional probability storage
-        self.conditional_q2_given_q1 = {}  # P(Q2|Q1)
-        self.conditional_q3_given_h1 = {}  # P(Q3|Q1,Q2) = P(Q3|H1)
-        self.conditional_q4_given_h1_q3 = {}  # P(Q4|Q1,Q2,Q3)
+        # Conditional probability storage with sample size tracking
+        self.conditional_q2_given_q1 = {}
+        self.conditional_q3_given_h1 = {}
+        self.conditional_q4_given_h1_q3 = {}
         
-        # NEW: Correlation factors
+        # Sample size tracking for credibility weighting
+        self.conditional_q2_sample_sizes = {}
+        self.conditional_q3_sample_sizes = {}
+        self.conditional_q4_sample_sizes = {}
+        
+        # Garbage time: Separate Q4 conditional distributions
+        self.conditional_q4_competitive = {}
+        self.conditional_q4_garbage = {}
+        self.conditional_q4_sample_sizes_competitive = {}
+        self.conditional_q4_sample_sizes_garbage = {}
+        
+        # Correlation factors
         self.total_correlation_q1_q2 = 0.0
         self.total_correlation_q3_q4 = 0.0
         self.margin_correlation_q1_q2 = 0.0
@@ -68,9 +79,19 @@ class CFBAllQuartersPredictor:
         self.q1_spread_interpolator = None
         self.Q1_PERCENTAGE_SPREAD = None
         
-        # NEW: Anchor threshold parameters
-        self.MIN_ANCHOR_OCCURRENCES = 50  # Statistical stability floor
-        self.ANCHOR_PERCENTAGE = 0.0075   # 0.75% of games
+        # Anchor threshold parameters
+        self.MIN_ANCHOR_OCCURRENCES = 50
+        self.ANCHOR_PERCENTAGE = 0.0075
+        
+        # Credibility smoothing parameter
+        self.CREDIBILITY_K = 50
+        
+        # Laplace smoothing parameter
+        self.LAPLACE_ALPHA = 0.01
+        
+        # Garbage time parameters (learned from data)
+        self.GARBAGE_TIME_MIDPOINT = None
+        self.GARBAGE_TIME_STEEPNESS = None
         
     def connect_to_database(self):
         """Connect to MySQL database."""
@@ -83,19 +104,18 @@ class CFBAllQuartersPredictor:
     
     def load_historical_data(self):
         """
-        Load all four quarters from database.
-        Standardize each quarter to favored-underdog orientation.
-        Calculate Q1 spread interpolator and conditional probability distributions.
+        Load all four quarters from database with temporal weighting.
+        Apply higher weights to recent seasons (2023+) due to rule changes.
         """
         connection = self.connect_to_database()
         if not connection:
             return False
             
         try:
-            # JOIN all 4 quarters onto one row per game
             query = """
             SELECT DISTINCT
                 g.game_id,
+                g.season,
                 g.pregame_spread,
                 g.pregame_total,
                 g.home_points,
@@ -125,6 +145,7 @@ class CFBAllQuartersPredictor:
                 AND q2.home_score IS NOT NULL
                 AND q3.home_score IS NOT NULL
                 AND q4.home_score IS NOT NULL
+                AND g.betting_provider NOT IN ('median_1_providers', 'teamrankings', 'consensus', 'null')
             ORDER BY g.game_id
             """
             
@@ -136,6 +157,19 @@ class CFBAllQuartersPredictor:
                 df = df.drop_duplicates(subset=['game_id'], keep='first')
             
             print(f"Loaded {len(df)} games with all 4 quarters")
+            
+            # Apply temporal weights for rule changes
+            df['temporal_weight'] = df['season'].apply(lambda s: 
+                2.5 if s >= 2023 else
+                1.5 if s >= 2020 else
+                1.0
+            )
+            
+            print(f"\nTemporal Weighting Applied:")
+            for season_group, weight in [(2023, 2.5), (2020, 1.5), (2014, 1.0)]:
+                count = len(df[df['temporal_weight'] == weight])
+                pct = count / len(df) * 100
+                print(f"  Season {season_group}+: Weight {weight}x, {count} games ({pct:.1f}%)")
             
             # Calculate game-level aggregates
             df['game_total'] = df['home_points'] + df['away_points']
@@ -149,14 +183,17 @@ class CFBAllQuartersPredictor:
                 df[f'q{q}_margin'] = df[f'q{q}_home_score'] - df[f'q{q}_away_score']
                 df[f'abs_q{q}_margin'] = df[f'q{q}_margin'].abs()
             
-            # Q1 percentage of game points
+            # Q1 percentage of game points (weighted)
             df['q1_points_pct'] = df['q1_total'] / df['game_total'].replace(0, np.nan)
-            q1_pct_points = df['q1_points_pct'].mean()
+            q1_pct_points = np.average(df['q1_points_pct'].dropna(), weights=df.loc[df['q1_points_pct'].notna(), 'temporal_weight'])
             
-            # Q1 percentage of game spread (non-tie games only)
+            # Q1 percentage of game spread (weighted, non-tie games only)
             non_tie_games = df[df['abs_game_margin'] > 0].copy()
             non_tie_games['q1_spread_pct'] = non_tie_games['abs_q1_margin'] / non_tie_games['abs_game_margin']
-            q1_pct_spread = non_tie_games['q1_spread_pct'].mean()
+            q1_pct_spread = np.average(
+                non_tie_games['q1_spread_pct'].dropna(),
+                weights=non_tie_games.loc[non_tie_games['q1_spread_pct'].notna(), 'temporal_weight']
+            )
             
             # Create smooth interpolator for Q1 spread percentage
             spread_sorted = non_tie_games.sort_values('abs_spread')
@@ -184,19 +221,23 @@ class CFBAllQuartersPredictor:
             self.Q1_PERCENTAGE_POINTS = q1_pct_points
             self.Q1_PERCENTAGE_SPREAD = q1_pct_spread
             
-            # Calculate empirical percentages for all quarters
-            print(f"\nEmpirical Quarter Statistics:")
+            # Calculate empirical percentages for all quarters (weighted)
+            print(f"\nWeighted Empirical Quarter Statistics:")
             for q in [1, 2, 3, 4]:
                 df[f'q{q}_points_pct'] = df[f'q{q}_total'] / df['game_total'].replace(0, np.nan)
-                q_pct_points = df[f'q{q}_points_pct'].mean()
+                q_pct_points = np.average(
+                    df[f'q{q}_points_pct'].dropna(),
+                    weights=df.loc[df[f'q{q}_points_pct'].notna(), 'temporal_weight']
+                )
                 setattr(self, f'Q{q}_PERCENTAGE_POINTS', q_pct_points)
+                
+                # Weighted mean for total points
+                weighted_mean_total = np.average(df[f'q{q}_total'], weights=df['temporal_weight'])
                 print(f"  Q{q} points as % of game total: {q_pct_points*100:.2f}%")
-                print(f"  Mean Q{q} total: {df[f'q{q}_total'].mean():.2f} points")
+                print(f"  Mean Q{q} total (weighted): {weighted_mean_total:.2f} points")
             
-            # NEW: Calculate correlation factors between quarters
+            # Quarter correlation analysis
             print(f"\nQuarter Correlation Analysis:")
-            
-            # Q1-Q2 correlations
             valid_games = df[(df['q1_total'] > 0) & (df['q2_total'] > 0)].copy()
             if len(valid_games) > 0:
                 self.total_correlation_q1_q2 = valid_games['q1_total'].corr(valid_games['q2_total'])
@@ -204,7 +245,6 @@ class CFBAllQuartersPredictor:
                 print(f"  Q1-Q2 total correlation: {self.total_correlation_q1_q2:.3f}")
                 print(f"  Q1-Q2 margin correlation: {self.margin_correlation_q1_q2:.3f}")
             
-            # Q3-Q4 correlations
             valid_games_h2 = df[(df['q3_total'] > 0) & (df['q4_total'] > 0)].copy()
             if len(valid_games_h2) > 0:
                 self.total_correlation_q3_q4 = valid_games_h2['q3_total'].corr(valid_games_h2['q4_total'])
@@ -213,19 +253,30 @@ class CFBAllQuartersPredictor:
                 print(f"  Q3-Q4 margin correlation: {self.margin_correlation_q3_q4:.3f}")
             print()
             
-            # Store typical game score
-            self.typical_game_score = df['game_total'].mean() / 2
-            print(f"Typical game score per team: {self.typical_game_score:.2f} points\n")
+            # Store typical game score (weighted)
+            self.typical_game_score = np.average(df['game_total'], weights=df['temporal_weight']) / 2
+            print(f"Typical game score per team (weighted): {self.typical_game_score:.2f} points\n")
+            
+            # Calculate halftime differential for Q3 context
+            df['h1_fav_score'] = np.where(
+                df['pregame_spread'] < 0,
+                df['q1_home_score'] + df['q2_home_score'],
+                df['q1_away_score'] + df['q2_away_score']
+            )
+            df['h1_dog_score'] = np.where(
+                df['pregame_spread'] < 0,
+                df['q1_away_score'] + df['q2_away_score'],
+                df['q1_home_score'] + df['q2_home_score']
+            )
+            df['h1_margin'] = df['h1_fav_score'] - df['h1_dog_score']
             
             # Standardize all quarters to favored-underdog format
             for q in [1, 2, 3, 4]:
-                # Raw home-away format
                 df[f'q{q}_raw_score_combo'] = (
                     df[f'q{q}_home_score'].astype(str) + '-' + 
                     df[f'q{q}_away_score'].astype(str)
                 )
                 
-                # Favored-underdog format
                 df[f'q{q}_favored_score'] = np.where(
                     df['pregame_spread'] < 0,
                     df[f'q{q}_home_score'],
@@ -243,8 +294,12 @@ class CFBAllQuartersPredictor:
                     df[f'q{q}_underdog_score'].astype(str)
                 )
             
-            # NEW: Build conditional probability distributions
-            print("Building conditional probability distributions...")
+            # Learn garbage time threshold from data
+            print("Learning garbage time threshold from data...")
+            self._learn_garbage_time_threshold(df)
+            
+            # Build conditional probability distributions
+            print("Building conditional probability distributions with sample size tracking...")
             self._build_conditional_distributions(df)
             
             self.historical_data = df
@@ -257,123 +312,391 @@ class CFBAllQuartersPredictor:
             traceback.print_exc()
             return False
     
+    def _learn_garbage_time_threshold(self, df):
+        """
+        Learn garbage time threshold from historical Q4 patterns using changepoint detection.
+        Uses data to find where Q4 correlation inverts (garbage time effect).
+        """
+        # Calculate entering Q4 margins
+        df_q4_analysis = df.copy()
+        
+        # Determine favorite from pregame spread
+        df_q4_analysis['favorite_is_home'] = df_q4_analysis['pregame_spread'] < 0
+        
+        # Calculate margins from favorite's perspective
+        df_q4_analysis['q3_fav'] = np.where(
+            df_q4_analysis['favorite_is_home'],
+            df_q4_analysis['q3_home_score'],
+            df_q4_analysis['q3_away_score']
+        )
+        df_q4_analysis['q3_dog'] = np.where(
+            df_q4_analysis['favorite_is_home'],
+            df_q4_analysis['q3_away_score'],
+            df_q4_analysis['q3_home_score']
+        )
+        df_q4_analysis['q4_fav'] = np.where(
+            df_q4_analysis['favorite_is_home'],
+            df_q4_analysis['q4_home_score'],
+            df_q4_analysis['q4_away_score']
+        )
+        df_q4_analysis['q4_dog'] = np.where(
+            df_q4_analysis['favorite_is_home'],
+            df_q4_analysis['q4_away_score'],
+            df_q4_analysis['q4_home_score']
+        )
+        
+        # Calculate entering Q4 margin (H1 + Q3)
+        df_q4_analysis['q3_margin'] = df_q4_analysis['q3_fav'] - df_q4_analysis['q3_dog']
+        df_q4_analysis['entering_q4_margin'] = df_q4_analysis['h1_margin'] + df_q4_analysis['q3_margin']
+        df_q4_analysis['q4_margin'] = df_q4_analysis['q4_fav'] - df_q4_analysis['q4_dog']
+        
+        # Bin by entering margin
+        margin_bins = np.arange(-35, 36, 2)
+        bin_centers = []
+        q4_margin_means = []
+        sample_sizes = []
+        
+        for i in range(len(margin_bins) - 1):
+            lower, upper = margin_bins[i], margin_bins[i+1]
+            mask = (df_q4_analysis['entering_q4_margin'] >= lower) & (df_q4_analysis['entering_q4_margin'] < upper)
+            subset = df_q4_analysis[mask]
+            
+            if len(subset) >= 15:
+                bin_centers.append((lower + upper) / 2)
+                q4_margin_means.append(subset['q4_margin'].mean())
+                sample_sizes.append(len(subset))
+        
+        if len(bin_centers) == 0:
+            print("  Insufficient data for garbage time analysis, using default threshold")
+            self.GARBAGE_TIME_MIDPOINT = 18.5
+            self.GARBAGE_TIME_STEEPNESS = 0.15
+            return
+        
+        bin_centers = np.array(bin_centers)
+        q4_margin_means = np.array(q4_margin_means)
+        sample_sizes = np.array(sample_sizes)
+        
+        # Find changepoint: where does correlation flip?
+        positive_mask = bin_centers > 7
+        positive_centers = bin_centers[positive_mask]
+        positive_means = q4_margin_means[positive_mask]
+        positive_sizes = sample_sizes[positive_mask]
+        
+        if len(positive_centers) < 10:
+            print("  Insufficient data for changepoint detection, using default")
+            self.GARBAGE_TIME_MIDPOINT = 18.5
+            self.GARBAGE_TIME_STEEPNESS = 0.15
+            return
+        
+        def find_changepoint(threshold):
+            """Find threshold that maximizes difference in slopes before/after."""
+            before_mask = positive_centers < threshold
+            after_mask = positive_centers >= threshold
+            
+            if before_mask.sum() < 3 or after_mask.sum() < 3:
+                return 1e6
+            
+            X_before = positive_centers[before_mask]
+            y_before = positive_means[before_mask]
+            w_before = positive_sizes[before_mask]
+            
+            X_after = positive_centers[after_mask]
+            y_after = positive_means[after_mask]
+            w_after = positive_sizes[after_mask]
+            
+            # Weighted linear regression slopes
+            if len(X_before) > 1:
+                W_before = np.diag(w_before)
+                X_before_mat = np.column_stack([np.ones(len(X_before)), X_before])
+                try:
+                    beta_before = np.linalg.lstsq(
+                        X_before_mat.T @ W_before @ X_before_mat,
+                        X_before_mat.T @ W_before @ y_before,
+                        rcond=None
+                    )[0]
+                    slope_before = beta_before[1]
+                except:
+                    slope_before = 0
+            else:
+                slope_before = 0
+            
+            if len(X_after) > 1:
+                W_after = np.diag(w_after)
+                X_after_mat = np.column_stack([np.ones(len(X_after)), X_after])
+                try:
+                    beta_after = np.linalg.lstsq(
+                        X_after_mat.T @ W_after @ X_after_mat,
+                        X_after_mat.T @ W_after @ y_after,
+                        rcond=None
+                    )[0]
+                    slope_after = beta_after[1]
+                except:
+                    slope_after = 0
+            else:
+                slope_after = 0
+            
+            slope_difference = slope_before - slope_after
+            return -slope_difference
+        
+        # Search for optimal threshold
+        thresholds_to_test = np.arange(12, 28, 0.5)
+        losses = [find_changepoint(t) for t in thresholds_to_test]
+        optimal_idx = np.argmin(losses)
+        optimal_threshold = thresholds_to_test[optimal_idx]
+        
+        # Fit sigmoid for smooth transitions
+        positive_big_lead = (bin_centers > 10)
+        garbage_indicator = np.where(
+            positive_big_lead & (q4_margin_means < 0),
+            1.0,
+            0.0
+        )
+        
+        def sigmoid_loss(params):
+            midpoint, steepness = params
+            predicted = expit(steepness * (bin_centers - midpoint))
+            weights = np.sqrt(sample_sizes)
+            return np.sum(weights * (predicted - garbage_indicator)**2)
+        
+        try:
+            result = minimize(
+                sigmoid_loss,
+                x0=[optimal_threshold, 0.15],
+                bounds=[(12.0, 28.0), (0.05, 0.5)],
+                method='L-BFGS-B'
+            )
+            
+            self.GARBAGE_TIME_MIDPOINT = result.x[0]
+            self.GARBAGE_TIME_STEEPNESS = result.x[1]
+        except:
+            # Fallback if optimization fails
+            self.GARBAGE_TIME_MIDPOINT = optimal_threshold
+            self.GARBAGE_TIME_STEEPNESS = 0.15
+        
+        print(f"  Garbage time midpoint: {self.GARBAGE_TIME_MIDPOINT:.1f} points (~{self.GARBAGE_TIME_MIDPOINT/7:.1f} TDs)")
+        print(f"  Garbage time steepness: {self.GARBAGE_TIME_STEEPNESS:.3f}")
+    
+    def predict_garbage_probability(self, entering_q4_margin):
+        """
+        Predict probability that game is in garbage time using smooth sigmoid.
+        NO hard thresholds - smooth transition based on learned parameters.
+        
+        Args:
+            entering_q4_margin: Favorite's cumulative margin (H1 + Q3)
+        
+        Returns:
+            float: Probability between 0 and 1
+        """
+        if self.GARBAGE_TIME_MIDPOINT is None:
+            return 0.0
+        
+        # Sigmoid: smooth transition, no discontinuities
+        prob = expit(self.GARBAGE_TIME_STEEPNESS * (abs(entering_q4_margin) - self.GARBAGE_TIME_MIDPOINT))
+        return float(prob)
+    
     def _build_conditional_distributions(self, df):
         """
-        Build empirical conditional distributions:
-        - P(Q2 | Q1)
-        - P(Q3 | H1) where H1 = Q1 + Q2
-        - P(Q4 | H1, Q3)
-        
-        We bucket Q1, H1, and (H1,Q3) contexts to ensure sufficient sample sizes.
+        Build empirical conditional distributions with sample size tracking
+        for Bayesian credibility weighting. Q4 uses smooth garbage time weighting.
         """
-        print("  Building P(Q2 | Q1)...")
+        print("  Building P(Q2 | Q1) with sample sizes...")
         
-        # Bucket Q1 outcomes by pattern and total
+        # Build P(Q2 | Q1)
         for _, game in df.iterrows():
             q1_score = game['q1_score_combo']
             q2_score = game['q2_score_combo']
+            weight = game['temporal_weight']
             
-            # Categorize Q1 context
             q1_context = self._categorize_quarter_outcome(q1_score)
             
             if q1_context not in self.conditional_q2_given_q1:
                 self.conditional_q2_given_q1[q1_context] = {}
+                self.conditional_q2_sample_sizes[q1_context] = 0
             
             if q2_score not in self.conditional_q2_given_q1[q1_context]:
                 self.conditional_q2_given_q1[q1_context][q2_score] = 0
             
-            self.conditional_q2_given_q1[q1_context][q2_score] += 1
+            self.conditional_q2_given_q1[q1_context][q2_score] += weight
+            self.conditional_q2_sample_sizes[q1_context] += weight
         
-        # Normalize P(Q2 | Q1_context)
+        # Normalize P(Q2 | Q1)
         for q1_context in self.conditional_q2_given_q1:
             total = sum(self.conditional_q2_given_q1[q1_context].values())
             if total > 0:
                 for q2_score in self.conditional_q2_given_q1[q1_context]:
                     self.conditional_q2_given_q1[q1_context][q2_score] /= total
         
+        sample_sizes_q2 = list(self.conditional_q2_sample_sizes.values())
         print(f"    P(Q2|Q1) contexts: {len(self.conditional_q2_given_q1)}")
+        print(f"    Sample sizes - Min: {min(sample_sizes_q2):.0f}, Median: {np.median(sample_sizes_q2):.0f}, Max: {max(sample_sizes_q2):.0f}")
         
         # Build P(Q3 | H1)
-        print("  Building P(Q3 | H1)...")
+        print("  Building P(Q3 | H1) with halftime differential emphasis...")
         for _, game in df.iterrows():
-            q1_fav = game['q1_favored_score']
-            q1_dog = game['q1_underdog_score']
-            q2_fav = game['q2_favored_score']
-            q2_dog = game['q2_underdog_score']
+            h1_fav = game['h1_fav_score']
+            h1_dog = game['h1_dog_score']
             q3_score = game['q3_score_combo']
+            weight = game['temporal_weight']
             
-            # H1 = Q1 + Q2
-            h1_fav = q1_fav + q2_fav
-            h1_dog = q1_dog + q2_dog
             h1_score = f"{h1_fav}-{h1_dog}"
-            
-            # Categorize H1 context
-            h1_context = self._categorize_quarter_outcome(h1_score)
+            h1_context = self._categorize_halftime_outcome(h1_score)
             
             if h1_context not in self.conditional_q3_given_h1:
                 self.conditional_q3_given_h1[h1_context] = {}
+                self.conditional_q3_sample_sizes[h1_context] = 0
             
             if q3_score not in self.conditional_q3_given_h1[h1_context]:
                 self.conditional_q3_given_h1[h1_context][q3_score] = 0
             
-            self.conditional_q3_given_h1[h1_context][q3_score] += 1
+            self.conditional_q3_given_h1[h1_context][q3_score] += weight
+            self.conditional_q3_sample_sizes[h1_context] += weight
         
-        # Normalize P(Q3 | H1_context)
+        # Normalize P(Q3 | H1)
         for h1_context in self.conditional_q3_given_h1:
             total = sum(self.conditional_q3_given_h1[h1_context].values())
             if total > 0:
                 for q3_score in self.conditional_q3_given_h1[h1_context]:
                     self.conditional_q3_given_h1[h1_context][q3_score] /= total
         
+        sample_sizes_q3 = list(self.conditional_q3_sample_sizes.values())
         print(f"    P(Q3|H1) contexts: {len(self.conditional_q3_given_h1)}")
+        print(f"    Sample sizes - Min: {min(sample_sizes_q3):.0f}, Median: {np.median(sample_sizes_q3):.0f}, Max: {max(sample_sizes_q3):.0f}")
         
-        # Build P(Q4 | H1, Q3)
-        print("  Building P(Q4 | H1, Q3)...")
+        # Build P(Q4 | H1, Q3) with SMOOTH garbage time weighting
+        print("  Building P(Q4 | H1, Q3) with smooth garbage time...")
+        
         for _, game in df.iterrows():
-            q1_fav = game['q1_favored_score']
-            q1_dog = game['q1_underdog_score']
-            q2_fav = game['q2_favored_score']
-            q2_dog = game['q2_underdog_score']
-            q3_fav = game['q3_favored_score']
-            q3_dog = game['q3_underdog_score']
+            h1_fav = game['h1_fav_score']
+            h1_dog = game['h1_dog_score']
+            
+            # Parse Q3 score
+            try:
+                q3_fav, q3_dog = map(int, game['q3_score_combo'].split('-'))
+            except:
+                continue
+            
             q4_score = game['q4_score_combo']
+            weight = game['temporal_weight']
             
-            # H1 = Q1 + Q2
-            h1_fav = q1_fav + q2_fav
-            h1_dog = q1_dog + q2_dog
-            h1_score = f"{h1_fav}-{h1_dog}"
+            # Calculate entering Q4 margin
+            h1_margin = h1_fav - h1_dog
+            q3_margin = q3_fav - q3_dog
+            entering_margin = h1_margin + q3_margin
+            
+            # Get SMOOTH garbage probability (no hard threshold)
+            garbage_prob = self.predict_garbage_probability(entering_margin)
+            
+            # Create context category for bucketing
+            entering_total = (h1_fav + h1_dog) + (q3_fav + q3_dog)
+            
+            if entering_total <= 28:
+                total_cat = 'low'
+            elif entering_total <= 56:
+                total_cat = 'med'
+            else:
+                total_cat = 'high'
+            
+            abs_margin = abs(entering_margin)
+            if abs_margin < 4:
+                margin_cat = 'close'
+            elif abs_margin < 8:
+                margin_cat = 'onescore'
+            elif abs_margin < 12:
+                margin_cat = 'onescore_plus'
+            elif abs_margin < 17:
+                margin_cat = 'twoscore'
+            elif abs_margin < 24:
+                margin_cat = 'threescore'
+            else:
+                margin_cat = 'blowout'
+            
+            if entering_margin > 0:
+                margin_cat += '_fav'
+            elif entering_margin < 0:
+                margin_cat += '_dog'
+            
+            context = f"{total_cat}_{margin_cat}"
+            
+            # Weight this observation across BOTH distributions
+            competitive_weight = weight * (1 - garbage_prob)
+            garbage_weight = weight * garbage_prob
+            
+            # Add to competitive distribution
+            if context not in self.conditional_q4_competitive:
+                self.conditional_q4_competitive[context] = {}
+                self.conditional_q4_sample_sizes_competitive[context] = 0
+            
+            if q4_score not in self.conditional_q4_competitive[context]:
+                self.conditional_q4_competitive[context][q4_score] = 0
+            
+            self.conditional_q4_competitive[context][q4_score] += competitive_weight
+            self.conditional_q4_sample_sizes_competitive[context] += competitive_weight
+            
+            # Add to garbage distribution
+            if context not in self.conditional_q4_garbage:
+                self.conditional_q4_garbage[context] = {}
+                self.conditional_q4_sample_sizes_garbage[context] = 0
+            
+            if q4_score not in self.conditional_q4_garbage[context]:
+                self.conditional_q4_garbage[context][q4_score] = 0
+            
+            self.conditional_q4_garbage[context][q4_score] += garbage_weight
+            self.conditional_q4_sample_sizes_garbage[context] += garbage_weight
+        
+        # Normalize both distributions
+        for context in self.conditional_q4_competitive:
+            total = sum(self.conditional_q4_competitive[context].values())
+            if total > 0:
+                for score in self.conditional_q4_competitive[context]:
+                    self.conditional_q4_competitive[context][score] /= total
+        
+        for context in self.conditional_q4_garbage:
+            total = sum(self.conditional_q4_garbage[context].values())
+            if total > 0:
+                for score in self.conditional_q4_garbage[context]:
+                    self.conditional_q4_garbage[context][score] /= total
+        
+        print(f"    Competitive contexts: {len(self.conditional_q4_competitive)}")
+        print(f"    Garbage contexts: {len(self.conditional_q4_garbage)}")
+        
+        # Also keep old Q4 distribution for backwards compatibility
+        for _, game in df.iterrows():
+            h1_fav = game['h1_fav_score']
+            h1_dog = game['h1_dog_score']
             q3_score = game['q3_score_combo']
+            q4_score = game['q4_score_combo']
+            weight = game['temporal_weight']
             
-            # Categorize (H1, Q3) context
-            h1_context = self._categorize_quarter_outcome(h1_score)
+            h1_score = f"{h1_fav}-{h1_dog}"
+            h1_context = self._categorize_halftime_outcome(h1_score)
             q3_context = self._categorize_quarter_outcome(q3_score)
             combined_context = f"{h1_context}|{q3_context}"
             
             if combined_context not in self.conditional_q4_given_h1_q3:
                 self.conditional_q4_given_h1_q3[combined_context] = {}
+                self.conditional_q4_sample_sizes[combined_context] = 0
             
             if q4_score not in self.conditional_q4_given_h1_q3[combined_context]:
                 self.conditional_q4_given_h1_q3[combined_context][q4_score] = 0
             
-            self.conditional_q4_given_h1_q3[combined_context][q4_score] += 1
+            self.conditional_q4_given_h1_q3[combined_context][q4_score] += weight
+            self.conditional_q4_sample_sizes[combined_context] += weight
         
-        # Normalize P(Q4 | H1_context, Q3_context)
+        # Normalize P(Q4 | H1, Q3)
         for combined_context in self.conditional_q4_given_h1_q3:
             total = sum(self.conditional_q4_given_h1_q3[combined_context].values())
             if total > 0:
                 for q4_score in self.conditional_q4_given_h1_q3[combined_context]:
                     self.conditional_q4_given_h1_q3[combined_context][q4_score] /= total
         
+        sample_sizes_q4 = list(self.conditional_q4_sample_sizes.values())
         print(f"    P(Q4|H1,Q3) contexts: {len(self.conditional_q4_given_h1_q3)}")
+        print(f"    Sample sizes - Min: {min(sample_sizes_q4):.0f}, Median: {np.median(sample_sizes_q4):.0f}, Max: {max(sample_sizes_q4):.0f}")
     
     def _categorize_quarter_outcome(self, score_str):
         """
-        Categorize a quarter outcome into a context bucket for conditional probability modeling.
-        
-        Buckets by:
-        - Total points: low (0-7), medium (8-20), high (21+)
-        - Margin: tie, close (1-7), blowout (8+)
-        - Direction: favorite ahead, underdog ahead
+        Categorize a quarter outcome into a context bucket.
+        Used for Q1, Q2, Q4.
         """
         try:
             fav_score, dog_score = map(int, score_str.split('-'))
@@ -401,398 +724,469 @@ class CFBAllQuartersPredictor:
         
         return f"{total_cat}_{margin_cat}"
     
+    def _categorize_halftime_outcome(self, h1_score_str):
+        """
+        Enhanced categorization for halftime score that emphasizes margin magnitude.
+        Used for conditioning Q3 and Q4 where possession and catch-up dynamics matter.
+        """
+        try:
+            fav_score, dog_score = map(int, h1_score_str.split('-'))
+        except:
+            return 'unknown'
+        
+        margin = fav_score - dog_score
+        total = fav_score + dog_score
+        
+        # Categorize total
+        if total <= 14:
+            total_cat = 'low'
+        elif total <= 35:
+            total_cat = 'med'
+        else:
+            total_cat = 'high'
+        
+        # Enhanced margin categorization with more granularity for Q3/Q4
+        if margin == 0:
+            margin_cat = 'tie'
+        elif margin >= 21:
+            margin_cat = 'blowout_fav'
+        elif margin >= 14:
+            margin_cat = 'twocore_fav'
+        elif margin >= 7:
+            margin_cat = 'onescore_fav'
+        elif margin > 0:
+            margin_cat = 'close_fav'
+        elif margin >= -7:
+            margin_cat = 'close_dog'
+        elif margin >= -14:
+            margin_cat = 'onescore_dog'
+        elif margin >= -21:
+            margin_cat = 'twoscore_dog'
+        else:
+            margin_cat = 'blowout_dog'
+        
+        return f"{total_cat}_{margin_cat}"
+    
     def calculate_empirical_distribution(self):
-        """Calculate empirical distributions for all quarters."""
+        """Calculate empirical distributions for all quarters with temporal weighting."""
         if self.historical_data is None:
             return
         
-        total_games = len(self.historical_data)
+        df = self.historical_data
+        total_weight = df['temporal_weight'].sum()
         
-        # NEW: Calculate adaptive anchor threshold
+        # Calculate adaptive anchor threshold
         anchor_threshold = max(
             self.MIN_ANCHOR_OCCURRENCES,
-            int(self.ANCHOR_PERCENTAGE * total_games)
+            int(self.ANCHOR_PERCENTAGE * len(df))
         )
         self.anchor_threshold = anchor_threshold
         
         print(f"\nAnchor Threshold Calculation:")
-        print(f"  Total games: {total_games}")
-        print(f"  Percentage-based threshold (0.75%): {int(self.ANCHOR_PERCENTAGE * total_games)}")
+        print(f"  Total games: {len(df)}")
+        print(f"  Percentage-based threshold (0.75%): {int(self.ANCHOR_PERCENTAGE * len(df))}")
         print(f"  Floor: {self.MIN_ANCHOR_OCCURRENCES}")
         print(f"  Selected threshold: {anchor_threshold}")
-        print(f"  (Scores appearing >= {anchor_threshold} times are anchors)")
         
         for q in [1, 2, 3, 4]:
-            # Home-away format
-            raw_counts = self.historical_data[f'q{q}_raw_score_combo'].value_counts()
-            raw_dist = {score: count / total_games for score, count in raw_counts.items()}
-            setattr(self, f'empirical_distribution_q{q}', raw_dist)
+            # Calculate weighted empirical distributions
+            score_col = f'q{q}_score_combo'
             
-            # Favored-underdog format
-            std_counts = self.historical_data[f'q{q}_score_combo'].value_counts()
-            std_dist = {score: count / total_games for score, count in std_counts.items()}
-            setattr(self, f'standardized_empirical_dist_q{q}', std_dist)
+            # Weighted counts
+            score_weights = df.groupby(score_col)['temporal_weight'].sum()
+            score_counts_dict = score_weights.to_dict()
             
-            print(f"\nQ{q}: {len(std_dist)} unique favored-underdog scores")
+            # Store raw empirical distribution
+            empirical_dist_attr = f'empirical_distribution_q{q}'
+            setattr(self, empirical_dist_attr, score_counts_dict)
             
-            # Count anchors vs rare scores with new threshold
-            anchors = sum(1 for count in std_counts.values if count >= anchor_threshold)
-            rares = sum(1 for count in std_counts.values if count < anchor_threshold)
-            print(f"  Anchors (>= {anchor_threshold}): {anchors}")
-            print(f"  Rare (< {anchor_threshold}): {rares}")
+            # Standardize empirical distributions
+            standardized_empirical_attr = f'standardized_empirical_dist_q{q}'
+            standardized_empirical = {}
+            
+            for score, weighted_count in score_counts_dict.items():
+                prob = weighted_count / total_weight
+                standardized_empirical[score] = prob
+            
+            setattr(self, standardized_empirical_attr, standardized_empirical)
+            
+            print(f"\nQ{q} Empirical Distribution:")
+            print(f"  Unique scores: {len(score_counts_dict)}")
+            print(f"  Total weighted observations: {total_weight:.1f}")
+            
+            # Identify anchor scores
+            anchor_scores_attr = f'anchor_scores_q{q}'
+            anchor_scores = [
+                score for score, weighted_count in score_counts_dict.items()
+                if weighted_count >= anchor_threshold
+            ]
+            setattr(self, anchor_scores_attr, anchor_scores)
+            
+            print(f"  Anchor scores (>= {anchor_threshold} weighted occurrences): {len(anchor_scores)}")
+            if len(anchor_scores) > 0:
+                print(f"  Top 5 anchor scores: {sorted(anchor_scores, key=lambda s: score_counts_dict[s], reverse=True)[:5]}")
     
     def get_score_pattern(self, score_str):
-        """Classify score into pattern (same as before)."""
-        fav_score, dog_score = map(int, score_str.split('-'))
+        """
+        Extract score pattern for bucketing similar rare scores.
+        Returns tuple of (total_bucket, margin_bucket, pattern_signature).
+        """
+        try:
+            fav_score, dog_score = map(int, score_str.split('-'))
+        except:
+            return None
+        
+        total = fav_score + dog_score
         margin = fav_score - dog_score
-        score_total = fav_score + dog_score
         
-        # Ties
-        if margin == 0:
-            if score_total == 0:
-                return 'scoreless_tie', score_total
-            elif score_total <= 14:
-                return 'low_tie', score_total
-            elif score_total <= 20:
-                return 'mid_tie', score_total
-            else:
-                return 'high_tie', score_total
-        
-        # Shutouts
-        elif dog_score == 0:
-            if fav_score <= 10:
-                return 'fav_shutout_low', score_total
-            elif fav_score <= 17:
-                return 'fav_shutout_mid', score_total
-            else:
-                return 'fav_shutout_high', score_total
-        
-        elif fav_score == 0:
-            if dog_score <= 10:
-                return 'dog_shutout_low', score_total
-            elif dog_score <= 17:
-                return 'dog_shutout_mid', score_total
-            else:
-                return 'dog_shutout_high', score_total
-        
-        # Scoring games by margin
-        elif margin >= 14:
-            return 'fav_blowout', score_total
-        elif margin >= 7:
-            return 'fav_win_multi', score_total
-        elif margin > 0:
-            return 'fav_win_close', score_total
-        elif margin <= -14:
-            return 'dog_blowout', score_total
-        elif margin <= -7:
-            return 'dog_win_multi', score_total
+        # Bucket total
+        if total <= 7:
+            total_bucket = 'low'
+        elif total <= 14:
+            total_bucket = 'low_mid'
+        elif total <= 21:
+            total_bucket = 'mid'
+        elif total <= 28:
+            total_bucket = 'mid_high'
         else:
-            return 'dog_win_close', score_total
+            total_bucket = 'high'
+        
+        # Bucket margin
+        abs_margin = abs(margin)
+        if abs_margin == 0:
+            margin_bucket = 'tie'
+        elif abs_margin <= 3:
+            margin_bucket = 'close'
+        elif abs_margin <= 7:
+            margin_bucket = 'one_score'
+        elif abs_margin <= 14:
+            margin_bucket = 'two_score'
+        else:
+            margin_bucket = 'blowout'
+        
+        # Add direction
+        if margin > 0:
+            margin_bucket += '_fav'
+        elif margin < 0:
+            margin_bucket += '_dog'
+        
+        # Pattern signature
+        pattern = f"{total_bucket}_{margin_bucket}"
+        
+        return (total_bucket, margin_bucket, pattern)
     
     def find_nearest_anchor(self, target_score, anchor_scores):
-        """Find nearest anchor score by pattern and total points."""
-        target_pattern, target_total = self.get_score_pattern(target_score)
+        """
+        Find the nearest anchor score to target_score using Euclidean distance.
+        Returns (nearest_anchor, distance).
+        """
+        try:
+            target_fav, target_dog = map(int, target_score.split('-'))
+        except:
+            return None, float('inf')
         
-        # Find anchors with same pattern
-        same_pattern_anchors = []
+        target_vec = np.array([target_fav, target_dog])
+        
+        min_dist = float('inf')
+        nearest_anchor = None
+        
         for anchor in anchor_scores:
-            anchor_pattern, anchor_total = self.get_score_pattern(anchor)
-            if anchor_pattern == target_pattern:
-                same_pattern_anchors.append((anchor, anchor_total))
+            try:
+                anchor_fav, anchor_dog = map(int, anchor.split('-'))
+                anchor_vec = np.array([anchor_fav, anchor_dog])
+                
+                dist = np.linalg.norm(target_vec - anchor_vec)
+                
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_anchor = anchor
+            except:
+                continue
         
-        # If we have same-pattern anchors, find closest by total
-        if same_pattern_anchors:
-            same_pattern_anchors.sort(key=lambda x: abs(x[1] - target_total))
-            return same_pattern_anchors[0][0]
-        
-        # Otherwise find closest by total regardless of pattern
-        all_anchors_with_totals = []
-        for anchor in anchor_scores:
-            anchor_pattern, anchor_total = self.get_score_pattern(anchor)
-            all_anchors_with_totals.append((anchor, anchor_total))
-        
-        all_anchors_with_totals.sort(key=lambda x: abs(x[1] - target_total))
-        return all_anchors_with_totals[0][0]
+        return nearest_anchor, min_dist
     
     def get_coefficient_bounds(self, score_str, n_occurrences):
-        """Get bounds for total and margin coefficients."""
-        fav_score, dog_score = map(int, score_str.split('-'))
+        """
+        Generate dynamic coefficient bounds based on score characteristics and sample size.
+        Larger samples allow tighter bounds around football-realistic values.
+        Returns: (spread_lower, spread_upper, total_lower, total_upper)
+        """
+        try:
+            fav_score, dog_score = map(int, score_str.split('-'))
+        except:
+            return (-10, 10, -10, 10)
+        
+        total = fav_score + dog_score
         margin = fav_score - dog_score
-        score_total = fav_score + dog_score
         
-        # For common scores, use wide bounds; for rare, use tighter
-        bound_width = 3 if n_occurrences >= 100 else 1.5
-        
-        if fav_score == dog_score:
-            # Ties
-            if score_total == 0:
-                total_bounds = (-bound_width, 0)
-            elif score_total <= 14:
-                total_bounds = (-bound_width, bound_width)
-            else:
-                total_bounds = (0, bound_width)
-            margin_bounds = (-1, 1)
-            
-        elif dog_score == 0:
-            # Favorite shutouts
-            if fav_score <= 10:
-                total_bounds = (-bound_width, 1)
-            elif fav_score <= 17:
-                total_bounds = (-bound_width, bound_width)
-            else:
-                total_bounds = (0, bound_width)
-            margin_bounds = (0, bound_width)
-            
-        elif fav_score == 0:
-            # Underdog shutouts
-            if dog_score <= 10:
-                total_bounds = (-bound_width, 1)
-            elif dog_score <= 17:
-                total_bounds = (-bound_width, bound_width)
-            else:
-                total_bounds = (0, bound_width)
-            margin_bounds = (-bound_width, 0)
-            
-        elif margin >= 14:
-            # Large margins
-            total_bounds = (0, bound_width)
-            margin_bounds = (0 if margin > 0 else -bound_width, bound_width if margin > 0 else 0)
-            
-        elif score_total >= 21:
-            # High-scoring games
-            total_bounds = (0, bound_width)
-            margin_bounds = (-bound_width, bound_width)
-            
+        # Base bounds: wider for rare scores, tighter for common scores
+        if n_occurrences >= 200:
+            base_width = 3.0
+        elif n_occurrences >= 100:
+            base_width = 5.0
+        elif n_occurrences >= 50:
+            base_width = 7.0
         else:
-            # Default: flexible bounds
-            total_bounds = (-bound_width, bound_width)
-            margin_bounds = (-bound_width, bound_width)
+            base_width = 10.0
         
-        return total_bounds, margin_bounds
+        # Adjust based on score characteristics
+        if total <= 7:
+            # Low-scoring: tighter bounds
+            spread_bound = base_width * 0.8
+            total_bound = base_width * 0.6
+        elif total >= 28:
+            # High-scoring: slightly wider for spread
+            spread_bound = base_width * 1.2
+            total_bound = base_width * 1.0
+        else:
+            # Mid-range: use base
+            spread_bound = base_width
+            total_bound = base_width
+        
+        # Special handling for ties and blowouts
+        if abs(margin) == 0:
+            spread_bound *= 0.7
+        elif abs(margin) > 21:
+            spread_bound *= 1.3
+        
+        return (-spread_bound, spread_bound, -total_bound, total_bound)
     
     def fit_model_for_quarter(self, quarter):
-        """Fit model for specific quarter using anchor + inheritance approach."""
-        if self.historical_data is None:
+        """
+        Fit anchor + inheritance logistic regression models for a specific quarter
+        with Elastic Net regularization and L-BFGS-B optimization.
+        """
+        empirical_dist = getattr(self, f'empirical_distribution_q{quarter}')
+        anchor_scores = getattr(self, f'anchor_scores_q{quarter}')
+        
+        if len(empirical_dist) == 0:
+            print(f"No empirical data for Q{quarter}")
             return
         
-        print(f"\n{'='*80}")
-        print(f"FITTING MODELS FOR QUARTER {quarter}")
-        print(f"{'='*80}")
+        print(f"\n{'='*60}")
+        print(f"Q{quarter} Model Fitting")
+        print(f"{'='*60}")
         
-        # Get score counts for this quarter
-        score_col = f'q{quarter}_score_combo'
-        score_counts = self.historical_data[score_col].value_counts()
+        # Fit individual models for anchor scores
+        anchor_models = {}
         
-        # Use adaptive anchor threshold
-        anchor_threshold = self.anchor_threshold
-        anchor_scores = score_counts[score_counts >= anchor_threshold].index.tolist()
-        rare_scores = score_counts[score_counts < anchor_threshold].index.tolist()
+        print(f"\nFitting {len(anchor_scores)} anchor score models...")
         
-        # Store anchor scores
-        setattr(self, f'anchor_scores_q{quarter}', anchor_scores)
-        
-        print(f"Anchor scores (>= {anchor_threshold} occurrences): {len(anchor_scores)}")
-        print(f"Rare scores (< {anchor_threshold} occurrences): {len(rare_scores)}")
-        
-        # Prepare feature matrix
-        df_filtered = self.historical_data.copy()
-        
-        # Calculate orthogonal features
-        df_filtered['abs_spread'] = df_filtered['pregame_spread'].abs()
-        df_filtered['implied_fav_total'] = (df_filtered['pregame_total'] + df_filtered['abs_spread']) / 2
-        df_filtered['implied_dog_total'] = (df_filtered['pregame_total'] - df_filtered['abs_spread']) / 2
-        
-        df_filtered['norm_fav'] = df_filtered['implied_fav_total'] / self.typical_game_score
-        df_filtered['norm_dog'] = df_filtered['implied_dog_total'] / self.typical_game_score
-        
-        df_filtered['feature_total'] = df_filtered['norm_fav'] + df_filtered['norm_dog']
-        df_filtered['feature_margin'] = df_filtered['norm_fav'] - df_filtered['norm_dog']
-        
-        # Feature matrix: [1, feature_total, feature_margin]
-        X = df_filtered[['feature_total', 'feature_margin']].values
-        X = np.column_stack([np.ones(len(X)), X])
-        
-        model_params = {}
-        
-        # Fit anchor scores (individual models)
-        print("Fitting anchor scores...")
-        anchor_fits = 0
-        
-        for score_combo in anchor_scores:
+        for i, score in enumerate(anchor_scores, 1):
+            if i % 20 == 0 or i == len(anchor_scores):
+                print(f"  Progress: {i}/{len(anchor_scores)} anchor scores fitted")
+            
             try:
-                # Get observations for this score
-                mask = df_filtered[score_col] == score_combo
-                y = mask.astype(int).values
-                n_occurrences = y.sum()
-                
-                if n_occurrences < 10:
-                    continue
-                
-                # Empirical probability
-                emp_prob = n_occurrences / len(y)
-                prior_logit = np.log(emp_prob / (1 - emp_prob + 1e-10))
-                
-                # Get coefficient bounds
-                total_bounds, margin_bounds = self.get_coefficient_bounds(score_combo, n_occurrences)
-                
-                # Negative log-likelihood
-                def negative_log_likelihood(params):
-                    logits = X @ params
-                    probabilities = 1 / (1 + np.exp(-np.clip(logits, -50, 50)))
-                    probabilities = np.clip(probabilities, 1e-10, 1 - 1e-10)
-                    ll = np.sum(y * np.log(probabilities) + (1 - y) * np.log(1 - probabilities))
-                    
-                    # L2 regularization
-                    regularization = 0.01 * np.sum(params[1:]**2)
-                    return -ll + regularization
-                
-                # Initial parameters
-                initial_params = np.array([prior_logit, 0.0, 0.0])
-                
-                # Bounds
-                param_bounds = [
-                    (prior_logit - 5, prior_logit + 5),
-                    total_bounds,
-                    margin_bounds
-                ]
-                
-                # Optimize
-                result = minimize(negative_log_likelihood, initial_params,
-                                method='L-BFGS-B', bounds=param_bounds)
-                
-                if result.success:
-                    model_params[score_combo] = result.x
-                    anchor_fits += 1
-                    
-            except Exception as e:
+                fav_score, dog_score = map(int, score.split('-'))
+            except:
                 continue
+            
+            # Create binary target
+            df = self.historical_data.copy()
+            df[f'target_{score}'] = (df[f'q{quarter}_score_combo'] == score).astype(float)
+            
+            X = df[['pregame_spread', 'pregame_total']].values
+            y = df[f'target_{score}'].values
+            weights = df['temporal_weight'].values
+            
+            n_occurrences = empirical_dist.get(score, 0)
+            
+            # Initial guess
+            spread_coef_init = (fav_score - dog_score) * 0.02
+            total_coef_init = ((fav_score + dog_score) / self.typical_game_score - 1.0) * 0.5
+            
+            base_prob = n_occurrences / self.historical_data['temporal_weight'].sum()
+            if base_prob <= 0 or base_prob >= 1:
+                base_prob = np.clip(base_prob, 0.001, 0.999)
+            intercept_init = np.log(base_prob / (1 - base_prob))
+            
+            initial_params = np.array([intercept_init, spread_coef_init, total_coef_init])
+            
+            # Regularization strengths
+            alpha_l1 = 0.005
+            alpha_l2 = 0.01
+            
+            # Coefficient bounds
+            spread_lower, spread_upper, total_lower, total_upper = self.get_coefficient_bounds(score, n_occurrences)
+            
+            bounds = [
+                (-10, 10),
+                (spread_lower, spread_upper),
+                (total_lower, total_upper)
+            ]
+            
+            def negative_log_likelihood(params):
+                """Elastic Net penalized negative log-likelihood."""
+                intercept, spread_coef, total_coef = params
+                
+                logits = intercept + spread_coef * X[:, 0] + total_coef * X[:, 1]
+                probs = 1 / (1 + np.exp(-np.clip(logits, -500, 500)))
+                probs = np.clip(probs, 1e-10, 1 - 1e-10)
+                
+                # Weighted negative log-likelihood
+                nll = -np.sum(weights * (y * np.log(probs) + (1 - y) * np.log(1 - probs)))
+                
+                # Elastic Net penalty
+                l1_penalty = alpha_l1 * (abs(spread_coef) + abs(total_coef))
+                l2_penalty = alpha_l2 * (spread_coef**2 + total_coef**2)
+                
+                return nll + l1_penalty + l2_penalty
+            
+            result = minimize(
+                negative_log_likelihood,
+                initial_params,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 200}
+            )
+            
+            if result.success:
+                anchor_models[score] = {
+                    'params': result.x,
+                    'n_occurrences': n_occurrences
+                }
         
-        print(f"Successfully fit {anchor_fits}/{len(anchor_scores)} anchor score models")
+        print(f"Successfully fitted {len(anchor_models)} anchor models")
         
-        # Fit rare scores (coefficient inheritance)
-        print("Fitting rare scores with coefficient inheritance...")
-        rare_fits = 0
+        # Fit models for rare scores using inheritance
+        rare_scores = [score for score in empirical_dist.keys() if score not in anchor_scores]
         
-        for score_combo in rare_scores:
+        print(f"\nFitting {len(rare_scores)} rare score models using inheritance...")
+        
+        rare_models = {}
+        inheritance_decay = 0.8
+        
+        for i, score in enumerate(rare_scores, 1):
+            if i % 50 == 0 or i == len(rare_scores):
+                print(f"  Progress: {i}/{len(rare_scores)} rare scores fitted")
+            
+            # Find nearest anchor
+            nearest_anchor, distance = self.find_nearest_anchor(score, anchor_scores)
+            
+            if nearest_anchor is None or nearest_anchor not in anchor_models:
+                continue
+            
+            # Inherit coefficients from nearest anchor
+            inherited_params = anchor_models[nearest_anchor]['params'].copy()
+            
+            # Apply inheritance decay
+            inherited_params[1:] *= inheritance_decay
+            
+            # Now fit with inherited coefficients as prior
             try:
-                # Get observations
-                mask = df_filtered[score_col] == score_combo
-                y = mask.astype(int).values
-                n_occurrences = y.sum()
-                
-                if n_occurrences < 5:
-                    continue
-                
-                # Empirical probability
-                emp_prob = n_occurrences / len(y)
-                prior_logit = np.log(emp_prob / (1 - emp_prob + 1e-10))
-                
-                # Find nearest anchor
-                nearest_anchor = self.find_nearest_anchor(score_combo, anchor_scores)
-                anchor_params = model_params.get(nearest_anchor)
-                
-                if anchor_params is None:
-                    continue
-                
-                # Inherit coefficients from anchor
-                inherited_coef_total = anchor_params[1]
-                inherited_coef_margin = anchor_params[2]
-                
-                # Get tighter bounds around inherited values
-                total_bounds_tight = (inherited_coef_total - 0.5, inherited_coef_total + 0.5)
-                margin_bounds_tight = (inherited_coef_margin - 0.5, inherited_coef_margin + 0.5)
-                
-                # Negative log-likelihood with stronger regularization
-                def negative_log_likelihood_inherited(params):
-                    logits = X @ params
-                    probabilities = 1 / (1 + np.exp(-np.clip(logits, -50, 50)))
-                    probabilities = np.clip(probabilities, 1e-10, 1 - 1e-10)
-                    ll = np.sum(y * np.log(probabilities) + (1 - y) * np.log(1 - probabilities))
-                    
-                    # Stronger regularization toward inherited coefficients
-                    reg_total = 0.1 * (params[1] - inherited_coef_total)**2
-                    reg_margin = 0.1 * (params[2] - inherited_coef_margin)**2
-                    return -ll + reg_total + reg_margin
-                
-                # Initial parameters start from inherited
-                initial_params = np.array([prior_logit, inherited_coef_total, inherited_coef_margin])
-                
-                param_bounds = [
-                    (prior_logit - 5, prior_logit + 5),
-                    total_bounds_tight,
-                    margin_bounds_tight
-                ]
-                
-                # Optimize
-                result = minimize(negative_log_likelihood_inherited, initial_params,
-                                method='L-BFGS-B', bounds=param_bounds)
-                
-                if result.success:
-                    model_params[score_combo] = result.x
-                    rare_fits += 1
-                    
-            except Exception as e:
+                fav_score, dog_score = map(int, score.split('-'))
+            except:
                 continue
+            
+            df = self.historical_data.copy()
+            df[f'target_{score}'] = (df[f'q{quarter}_score_combo'] == score).astype(float)
+            
+            X = df[['pregame_spread', 'pregame_total']].values
+            y = df[f'target_{score}'].values
+            weights = df['temporal_weight'].values
+            
+            n_occurrences = empirical_dist.get(score, 0)
+            
+            # Strong regularization toward inherited params
+            alpha_l1 = 0.01
+            alpha_l2 = 0.02
+            prior_strength = 0.1
+            
+            spread_lower, spread_upper, total_lower, total_upper = self.get_coefficient_bounds(score, n_occurrences)
+            
+            bounds = [
+                (-10, 10),
+                (spread_lower, spread_upper),
+                (total_lower, total_upper)
+            ]
+            
+            def negative_log_likelihood_inherited(params):
+                """NLL with strong prior toward inherited params."""
+                intercept, spread_coef, total_coef = params
+                
+                logits = intercept + spread_coef * X[:, 0] + total_coef * X[:, 1]
+                probs = 1 / (1 + np.exp(-np.clip(logits, -500, 500)))
+                probs = np.clip(probs, 1e-10, 1 - 1e-10)
+                
+                # Weighted negative log-likelihood
+                nll = -np.sum(weights * (y * np.log(probs) + (1 - y) * np.log(1 - probs)))
+                
+                # Elastic Net penalty
+                l1_penalty = alpha_l1 * (abs(spread_coef) + abs(total_coef))
+                l2_penalty = alpha_l2 * (spread_coef**2 + total_coef**2)
+                
+                # Prior toward inherited params
+                prior_penalty = prior_strength * np.sum((params[1:] - inherited_params[1:])**2)
+                
+                return nll + l1_penalty + l2_penalty + prior_penalty
+            
+            result = minimize(
+                negative_log_likelihood_inherited,
+                inherited_params,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 100}
+            )
+            
+            if result.success:
+                rare_models[score] = {
+                    'params': result.x,
+                    'n_occurrences': n_occurrences,
+                    'inherited_from': nearest_anchor
+                }
         
-        print(f"Successfully fit {rare_fits}/{len(rare_scores)} rare score models")
+        print(f"Successfully fitted {len(rare_models)} rare score models")
         
-        # Store model parameters
-        setattr(self, f'model_params_q{quarter}', model_params)
-        print(f"Total models for Q{quarter}: {len(model_params)}")
+        # Combine all models
+        all_models = {}
+        all_models.update(anchor_models)
+        all_models.update(rare_models)
+        
+        model_params_attr = f'model_params_q{quarter}'
+        setattr(self, model_params_attr, all_models)
+        
+        print(f"\nQ{quarter} Model Summary:")
+        print(f"  Anchor models: {len(anchor_models)}")
+        print(f"  Inherited models: {len(rare_models)}")
+        print(f"  Total models: {len(all_models)}")
     
     def fit_model(self):
-        """Fit models for all four quarters."""
-        print(f"\n{'='*80}")
-        print(f"FITTING MODELS FOR ALL QUARTERS")
-        print(f"{'='*80}")
+        """Fit logistic regression models for all four quarters."""
+        print("\nFitting Anchor + Inheritance Models for All Quarters")
+        print("="*60)
         
         for quarter in [1, 2, 3, 4]:
             self.fit_model_for_quarter(quarter)
+        
+        print(f"\n{'='*60}")
+        print("All Quarter Models Fitted Successfully")
+        print(f"{'='*60}\n")
     
     def predict_standardized_probability(self, spread, total, quarter):
         """
-        Predict probabilities for a quarter in favored-underdog format.
-        Uses same approach as before.
+        Predict probabilities for all scores in specified quarter.
+        Returns distribution in favored-underdog format.
         """
-        empirical_dist = getattr(self, f'standardized_empirical_dist_q{quarter}')
         model_params = getattr(self, f'model_params_q{quarter}')
         
-        if not empirical_dist:
+        if len(model_params) == 0:
+            print(f"No model for Q{quarter}")
             return {}
         
-        # Calculate features
-        abs_spread = abs(spread)
-        implied_fav_total = (total + abs_spread) / 2
-        implied_dog_total = (total - abs_spread) / 2
-        
-        norm_fav = implied_fav_total / self.typical_game_score
-        norm_dog = implied_dog_total / self.typical_game_score
-        
-        feature_total = norm_fav + norm_dog
-        feature_margin = norm_fav - norm_dog
-        
-        # Feature vector
-        X_pred = np.array([1.0, feature_total, feature_margin])
-        
-        # Generate predictions
         predictions = {}
         
-        for score in empirical_dist.keys():
-            base_prob = empirical_dist[score]
+        for score, model_info in model_params.items():
+            params = model_info['params']
+            intercept, spread_coef, total_coef = params
             
-            # Apply model adjustment if available
-            if score in model_params:
-                params = model_params[score]
-                logit = X_pred @ params
-                model_prob = 1 / (1 + np.exp(-np.clip(logit, -50, 50)))
-                
-                # Blend: 90% model, 10% empirical
-                predicted_prob = 0.9 * model_prob + 0.1 * base_prob
-            else:
-                # No model for this score, use empirical only
-                predicted_prob = base_prob
+            # Calculate logit
+            logit = intercept + spread_coef * spread + total_coef * total
             
-            predictions[score] = predicted_prob
+            # Convert to probability
+            prob = 1 / (1 + np.exp(-np.clip(logit, -500, 500)))
+            
+            if prob > 1e-6:
+                predictions[score] = prob
         
         # Normalize
         total_prob = sum(predictions.values())
@@ -801,36 +1195,53 @@ class CFBAllQuartersPredictor:
         
         return predictions
     
-    def adjust_quarter_for_correlation(self, current_q_dist, prior_context, correlation_map):
+    def adjust_quarter_for_correlation(self, current_q_dist, prior_context, correlation_map, sample_size_map):
         """
-        Adjust quarter distribution based on prior quarter context using learned conditional probabilities.
+        Adjust quarter distribution using Bayesian credibility weighting with Laplace smoothing.
+        Laplace smoothing prevents zero probabilities from eliminating valid scores.
         
         Args:
             current_q_dist: Base distribution for current quarter
             prior_context: Context string from prior quarter(s)
-            correlation_map: Conditional probability map P(Q_current | Q_prior)
+            correlation_map: Conditional probability map
+            sample_size_map: Sample sizes for each context
         
         Returns:
-            Adjusted distribution that accounts for correlation
+            Adjusted distribution with credibility-weighted correlation
         """
         if prior_context not in correlation_map:
-            # No learned conditional distribution, return base distribution
             return current_q_dist
         
-        conditional_dist = correlation_map[prior_context]
+        raw_conditional_dist = correlation_map[prior_context]
+        n = sample_size_map.get(prior_context, 0)
         
-        # Blend base prediction with conditional distribution
-        # Use 70% base (from regression model) + 30% conditional (from empirical correlation)
-        adjusted_dist = {}
+        # LAPLACE SMOOTHING: Add pseudocount to prevent zeros
+        all_scores = set(current_q_dist.keys())
+        smoothed_conditional_dist = {}
         
-        all_scores = set(current_q_dist.keys()) | set(conditional_dist.keys())
+        raw_total = sum(raw_conditional_dist.values())
+        vocab_size = len(all_scores)
+        smoothed_total = raw_total + self.LAPLACE_ALPHA * vocab_size
         
         for score in all_scores:
-            base_prob = current_q_dist.get(score, 0.0)
-            cond_prob = conditional_dist.get(score, base_prob)  # Default to base if not in conditional
+            raw_count = raw_conditional_dist.get(score, 0.0)
+            # Add pseudocount: ensures no score has exactly zero probability
+            smoothed_prob = (raw_count + self.LAPLACE_ALPHA) / smoothed_total
+            smoothed_conditional_dist[score] = smoothed_prob
+        
+        # Bayesian credibility weight
+        credibility = n / (n + self.CREDIBILITY_K)
+        
+        # Blend with credibility weighting
+        adjusted_dist = {}
+        
+        for score in all_scores:
+            base_prob = current_q_dist[score]
+            cond_prob = smoothed_conditional_dist[score]
             
-            # Weighted blend
-            adjusted_prob = 0.7 * base_prob + 0.3 * cond_prob
+            # Credibility-weighted blend
+            # Now cond_prob is NEVER exactly zero (minimum is alpha / smoothed_total)
+            adjusted_prob = (1 - credibility) * base_prob + credibility * cond_prob
             
             if adjusted_prob > 0:
                 adjusted_dist[score] = adjusted_prob
@@ -862,115 +1273,179 @@ class CFBAllQuartersPredictor:
         return home_away_predictions
     
     def simulate_game_with_correlation(self, pregame_spread, total, n_sims=100000, 
-                                       q1_dist=None, q2_dist=None, q3_dist=None, q4_dist=None):
+                                      home_favored=True, include_q4_garbage=True):
         """
-        NEW: Simulate full game using Bayesian updating with quarter correlations.
-        
-        This replaces simple convolution with proper P(Q2|Q1), P(Q3|H1), P(Q4|H1,Q3).
-        
-        Args:
-            pregame_spread: Game spread
-            total: Game total
-            n_sims: Number of Monte Carlo simulations
-            q1_dist, q2_dist, q3_dist, q4_dist: Optional quarter distributions to use
-                If None, will generate from model
-        
-        Returns:
-            Dictionary with full game score distribution
+        Simulate full game with quarter correlations and optional Q4 garbage time effects.
+        Uses conditional distributions for Q2, Q3, Q4 with Bayesian credibility weighting.
         """
-        # Generate base quarter distributions (or use provided ones)
-        dist_q1_base = q1_dist if q1_dist is not None else self.predict_standardized_probability(pregame_spread, total, 1)
-        dist_q2_base = q2_dist if q2_dist is not None else self.predict_standardized_probability(pregame_spread, total, 2)
-        dist_q3_base = q3_dist if q3_dist is not None else self.predict_standardized_probability(pregame_spread, total, 3)
-        dist_q4_base = q4_dist if q4_dist is not None else self.predict_standardized_probability(pregame_spread, total, 4)
+        # Predict base Q1 distribution
+        q1_base = self.predict_standardized_probability(pregame_spread, total, 1)
         
-        # Convert to numpy arrays for vectorized sampling
-        q1_scores = list(dist_q1_base.keys())
-        q1_probs = np.array([dist_q1_base[s] for s in q1_scores])
+        # Initialize result storage
+        all_simulations = []
         
-        # Storage for full game outcomes
-        full_game_scores = {}
-        
-        # Run Monte Carlo simulation
         for _ in range(n_sims):
             # Sample Q1
-            q1_idx = np.random.choice(len(q1_scores), p=q1_probs)
-            q1_score = q1_scores[q1_idx]
+            q1_scores = list(q1_base.keys())
+            q1_probs = list(q1_base.values())
+            q1_score = np.random.choice(q1_scores, p=q1_probs)
             
-            # Adjust Q2 based on Q1 context
+            # Get Q2 with correlation
             q1_context = self._categorize_quarter_outcome(q1_score)
-            dist_q2_adj = self.adjust_quarter_for_correlation(
-                dist_q2_base, q1_context, self.conditional_q2_given_q1
+            q2_base = self.predict_standardized_probability(pregame_spread, total, 2)
+            q2_dist = self.adjust_quarter_for_correlation(
+                q2_base, q1_context,
+                self.conditional_q2_given_q1,
+                self.conditional_q2_sample_sizes
             )
             
-            # Sample Q2
-            q2_scores = list(dist_q2_adj.keys())
-            q2_probs = np.array([dist_q2_adj[s] for s in q2_scores])
-            q2_probs /= q2_probs.sum()  # Ensure normalized
-            q2_idx = np.random.choice(len(q2_scores), p=q2_probs)
-            q2_score = q2_scores[q2_idx]
+            q2_scores = list(q2_dist.keys())
+            q2_probs = list(q2_dist.values())
+            q2_score = np.random.choice(q2_scores, p=q2_probs)
             
-            # Calculate H1 (first half)
+            # Calculate H1 for Q3 conditioning
             q1_fav, q1_dog = map(int, q1_score.split('-'))
             q2_fav, q2_dog = map(int, q2_score.split('-'))
             h1_fav = q1_fav + q2_fav
             h1_dog = q1_dog + q2_dog
             h1_score = f"{h1_fav}-{h1_dog}"
             
-            # Adjust Q3 based on H1 context
-            h1_context = self._categorize_quarter_outcome(h1_score)
-            dist_q3_adj = self.adjust_quarter_for_correlation(
-                dist_q3_base, h1_context, self.conditional_q3_given_h1
+            # Get Q3 with H1 correlation
+            h1_context = self._categorize_halftime_outcome(h1_score)
+            q3_base = self.predict_standardized_probability(pregame_spread, total, 3)
+            q3_dist = self.adjust_quarter_for_correlation(
+                q3_base, h1_context,
+                self.conditional_q3_given_h1,
+                self.conditional_q3_sample_sizes
             )
             
-            # Sample Q3
-            q3_scores = list(dist_q3_adj.keys())
-            q3_probs = np.array([dist_q3_adj[s] for s in q3_scores])
-            q3_probs /= q3_probs.sum()
-            q3_idx = np.random.choice(len(q3_scores), p=q3_probs)
-            q3_score = q3_scores[q3_idx]
+            q3_scores = list(q3_dist.keys())
+            q3_probs = list(q3_dist.values())
+            q3_score = np.random.choice(q3_scores, p=q3_probs)
             
-            # Adjust Q4 based on (H1, Q3) context
-            q3_context = self._categorize_quarter_outcome(q3_score)
-            combined_context = f"{h1_context}|{q3_context}"
-            dist_q4_adj = self.adjust_quarter_for_correlation(
-                dist_q4_base, combined_context, self.conditional_q4_given_h1_q3
-            )
+            # Get Q4 with optional garbage time blending
+            if include_q4_garbage:
+                # Calculate entering Q4 margin for garbage time
+                q3_fav, q3_dog = map(int, q3_score.split('-'))
+                h1_margin = h1_fav - h1_dog
+                q3_margin = q3_fav - q3_dog
+                entering_margin = h1_margin + q3_margin
+                
+                # Get garbage probability
+                garbage_prob = self.predict_garbage_probability(entering_margin)
+                
+                # Create context
+                entering_total = h1_fav + h1_dog + q3_fav + q3_dog
+                
+                if entering_total <= 28:
+                    total_cat = 'low'
+                elif entering_total <= 56:
+                    total_cat = 'med'
+                else:
+                    total_cat = 'high'
+                
+                abs_margin = abs(entering_margin)
+                if abs_margin < 4:
+                    margin_cat = 'close'
+                elif abs_margin < 8:
+                    margin_cat = 'onescore'
+                elif abs_margin < 12:
+                    margin_cat = 'onescore_plus'
+                elif abs_margin < 17:
+                    margin_cat = 'twoscore'
+                elif abs_margin < 24:
+                    margin_cat = 'threescore'
+                else:
+                    margin_cat = 'blowout'
+                
+                if entering_margin > 0:
+                    margin_cat += '_fav'
+                elif entering_margin < 0:
+                    margin_cat += '_dog'
+                
+                context = f"{total_cat}_{margin_cat}"
+                
+                # Get base Q4
+                q4_base = self.predict_standardized_probability(pregame_spread, total, 4)
+                
+                # Blend with competitive distribution
+                competitive_dist = self.conditional_q4_competitive.get(context, {})
+                competitive_n = self.conditional_q4_sample_sizes_competitive.get(context, 0)
+                competitive_credibility = competitive_n / (competitive_n + self.CREDIBILITY_K)
+                
+                competitive_adjusted = {}
+                all_scores = set(q4_base.keys()) | set(competitive_dist.keys())
+                
+                for score in all_scores:
+                    base_prob = q4_base.get(score, 0)
+                    cond_prob = competitive_dist.get(score, base_prob)
+                    competitive_adjusted[score] = (1 - competitive_credibility) * base_prob + competitive_credibility * cond_prob
+                
+                # Blend with garbage distribution
+                garbage_dist = self.conditional_q4_garbage.get(context, {})
+                garbage_n = self.conditional_q4_sample_sizes_garbage.get(context, 0)
+                garbage_credibility = garbage_n / (garbage_n + self.CREDIBILITY_K)
+                
+                garbage_adjusted = {}
+                for score in all_scores:
+                    base_prob = q4_base.get(score, 0)
+                    cond_prob = garbage_dist.get(score, base_prob)
+                    garbage_adjusted[score] = (1 - garbage_credibility) * base_prob + garbage_credibility * cond_prob
+                
+                # Smooth mixture based on garbage_prob
+                q4_dist = {}
+                for score in all_scores:
+                    comp_prob = competitive_adjusted.get(score, 0)
+                    garb_prob = garbage_adjusted.get(score, 0)
+                    q4_dist[score] = (1 - garbage_prob) * comp_prob + garbage_prob * garb_prob
+                
+                # Normalize
+                total_prob = sum(q4_dist.values())
+                if total_prob > 0:
+                    q4_dist = {score: prob/total_prob for score, prob in q4_dist.items()}
+            else:
+                # Use old method without garbage time
+                h1_context = self._categorize_halftime_outcome(h1_score)
+                q3_context = self._categorize_quarter_outcome(q3_score)
+                combined_context = f"{h1_context}|{q3_context}"
+                
+                q4_base = self.predict_standardized_probability(pregame_spread, total, 4)
+                q4_dist = self.adjust_quarter_for_correlation(
+                    q4_base, combined_context,
+                    self.conditional_q4_given_h1_q3,
+                    self.conditional_q4_sample_sizes
+                )
             
-            # Sample Q4
-            q4_scores = list(dist_q4_adj.keys())
-            q4_probs = np.array([dist_q4_adj[s] for s in q4_scores])
-            q4_probs /= q4_probs.sum()
-            q4_idx = np.random.choice(len(q4_scores), p=q4_probs)
-            q4_score = q4_scores[q4_idx]
+            q4_scores = list(q4_dist.keys())
+            q4_probs = list(q4_dist.values())
+            q4_score = np.random.choice(q4_scores, p=q4_probs)
             
-            # Calculate full game
+            # Parse all quarters
+            q1_fav, q1_dog = map(int, q1_score.split('-'))
+            q2_fav, q2_dog = map(int, q2_score.split('-'))
             q3_fav, q3_dog = map(int, q3_score.split('-'))
             q4_fav, q4_dog = map(int, q4_score.split('-'))
-            full_fav = h1_fav + q3_fav + q4_fav
-            full_dog = h1_dog + q3_dog + q4_dog
-            full_score = f"{full_fav}-{full_dog}"
             
-            # Accumulate
-            if full_score not in full_game_scores:
-                full_game_scores[full_score] = 0
-            full_game_scores[full_score] += 1
+            # Calculate game total
+            game_fav = q1_fav + q2_fav + q3_fav + q4_fav
+            game_dog = q1_dog + q2_dog + q3_dog + q4_dog
+            
+            all_simulations.append({
+                'q1_fav': q1_fav, 'q1_dog': q1_dog,
+                'q2_fav': q2_fav, 'q2_dog': q2_dog,
+                'q3_fav': q3_fav, 'q3_dog': q3_dog,
+                'q4_fav': q4_fav, 'q4_dog': q4_dog,
+                'game_fav': game_fav, 'game_dog': game_dog
+            })
         
-        # Convert counts to probabilities
-        for score in full_game_scores:
-            full_game_scores[score] /= n_sims
-        
-        return full_game_scores
+        return pd.DataFrame(all_simulations)
     
     def convolve_quarters(self, dist1, dist2):
         """
-        Convolve two quarter distributions.
-        Uses independence assumption: P(A and B) = P(A) * P(B)
-        
-        NOTE: This is now only used for generating initial distributions.
-        The actual game simulation uses simulate_game_with_correlation().
+        Convolve two quarter distributions to get combined distribution.
+        Used for creating full-game distributions from quarter predictions.
         """
-        combined_dist = {}
+        combined = {}
         
         for score1, prob1 in dist1.items():
             fav1, dog1 = map(int, score1.split('-'))
@@ -978,289 +1453,415 @@ class CFBAllQuartersPredictor:
             for score2, prob2 in dist2.items():
                 fav2, dog2 = map(int, score2.split('-'))
                 
-                # Add scores together
+                # Combined score
                 combined_fav = fav1 + fav2
                 combined_dog = dog1 + dog2
                 combined_score = f"{combined_fav}-{combined_dog}"
                 
-                # Multiply probabilities (independence)
+                # Combined probability
                 combined_prob = prob1 * prob2
                 
-                # Accumulate probability
-                if combined_score not in combined_dist:
-                    combined_dist[combined_score] = 0.0
-                combined_dist[combined_score] += combined_prob
+                if combined_score not in combined:
+                    combined[combined_score] = 0
+                combined[combined_score] += combined_prob
         
-        return combined_dist
+        return combined
     
     def calibrate_full_game_distribution(self, pregame_spread, total, max_iterations=10, n_sims=5000):
         """
-        Fast calibration using adaptive simulation sample sizes.
-        
-        Strategy:
-        - Early iterations: 2000 sims (fast, rough calibration)
-        - Later iterations: 5000 sims (accurate, fine-tuning)
-        - Uses simulation throughout to capture correlations
-        
-        Args:
-            pregame_spread: Game spread
-            total: Game total
-            max_iterations: Max iterations (default 10)
-            n_sims: Final simulation count
-        
-        Returns:
-            Dict with calibrated quarters and full game
+        Iteratively calibrate quarter distributions to match pregame lines.
+        UPDATED: Targets 50% Win Probability (Median) instead of Expected Points (Mean).
         """
-        abs_spread = abs(pregame_spread)
+        # Get base predictions for each quarter
+        q1_base = self.predict_standardized_probability(pregame_spread, total, 1)
+        q2_base = self.predict_standardized_probability(pregame_spread, total, 2)
+        q3_base = self.predict_standardized_probability(pregame_spread, total, 3)
+        q4_base = self.predict_standardized_probability(pregame_spread, total, 4)
         
-        # Calibration hyperparameters
-        LEARNING_RATE = 0.12      # Slightly higher for faster convergence
-        CLAMP_MIN = 0.94          # ±6% per iteration
-        CLAMP_MAX = 1.06
-        TOLERANCE = 0.010         # 49% - 51% range
+        # Initialize working distributions
+        q1_dist = q1_base.copy()
+        q2_dist = q2_base.copy()
+        q3_dist = q3_base.copy()
+        q4_dist = q4_base.copy()
         
-        print(f"\n{'='*80}")
-        print(f"ADAPTIVE CALIBRATION: Fast early, accurate late")
-        print(f"Target: 48% - 52% for spread={abs_spread:.1f}, total={total:.1f}")
-        print(f"{'='*80}")
+        home_favored = pregame_spread < 0
+        target_spread_value = abs(pregame_spread)
         
-        # Calculate metrics
-        def calculate_metrics(dist):
-            prob_fav_cover = 0.0
-            prob_over = 0.0
+        # Calculate OT adjustment
+        if abs(pregame_spread) <= 3:
+            ot_prob = 0.06
+        elif abs(pregame_spread) <= 7:
+            ot_prob = 0.04
+        else:
+            ot_prob = 0.02
+        expected_ot_points = ot_prob * 14
+        target_total_value = total - expected_ot_points
+        
+        print(f"\nCalibrating to 50% Probability: Spread={target_spread_value:.1f}, Reg Total={target_total_value:.1f}")
+        
+        # Learning rates for probability calibration (higher than point-based)
+        spread_learning_rate = 0.20
+        total_learning_rate = 0.15
+        
+        # Define logit transform functions
+        def prob_to_logit(prob):
+            prob = np.clip(prob, 1e-10, 1 - 1e-10)
+            return np.log(prob / (1 - prob))
+        
+        def logit_to_prob(logit):
+            return 1 / (1 + np.exp(-np.clip(logit, -500, 500)))
+        
+        def calculate_probabilities(dist):
+            """Calculate Cover % and Over % from distribution."""
+            cover_prob = 0.0
+            over_prob = 0.0
             
             for score, prob in dist.items():
-                fav_score, dog_score = map(int, score.split('-'))
-                margin = fav_score - dog_score
-                game_total = fav_score + dog_score
+                fav_pts, dog_pts = map(int, score.split('-'))
+                margin = fav_pts - dog_pts
+                score_total = fav_pts + dog_pts
                 
-                if margin > abs_spread:
-                    prob_fav_cover += prob
-                elif margin == abs_spread:
-                    prob_fav_cover += prob * 0.5
+                # Spread Logic (Handle Pushes as 0.5)
+                if margin > target_spread_value:
+                    cover_prob += prob
+                elif margin == target_spread_value:
+                    cover_prob += (0.5 * prob)
                 
-                if game_total > total:
-                    prob_over += prob
-                elif game_total == total:
-                    prob_over += prob * 0.5
+                # Total Logic (Handle Pushes as 0.5)
+                if score_total > target_total_value:
+                    over_prob += prob
+                elif score_total == target_total_value:
+                    over_prob += (0.5 * prob)
             
-            return prob_fav_cover, prob_over
+            return cover_prob, over_prob
         
-        # Calculate responsibility
-        def calculate_responsibility(score, expected_q_total, expected_q_margin):
-            fav_score, dog_score = map(int, score.split('-'))
-            score_total = fav_score + dog_score
-            margin = fav_score - dog_score
-            
-            if expected_q_total > 0:
-                total_resp = (score_total - expected_q_total) / expected_q_total
-            else:
-                total_resp = 0.0
-            
-            if abs(expected_q_margin) > 0.1:
-                spread_resp = (margin - expected_q_margin) / abs(expected_q_margin)
-            else:
-                spread_resp = margin / 3.0
-            
-            return total_resp, spread_resp
-        
-        # Initialize quarter distributions
-        dist_q1 = self.predict_standardized_probability(pregame_spread, total, 1)
-        dist_q2 = self.predict_standardized_probability(pregame_spread, total, 2)
-        dist_q3 = self.predict_standardized_probability(pregame_spread, total, 3)
-        dist_q4 = self.predict_standardized_probability(pregame_spread, total, 4)
-        
-        expected_totals = [
-            total * self.Q1_PERCENTAGE_POINTS,
-            total * self.Q2_PERCENTAGE_POINTS,
-            total * self.Q3_PERCENTAGE_POINTS,
-            total * self.Q4_PERCENTAGE_POINTS
-        ]
-        
-        expected_margins = [abs_spread * 0.25] * 4
-        
-        # Adaptive simulation with correlation
         for iteration in range(max_iterations):
-            # Adaptive sample size: start small, end large
-            if iteration < 3:
-                current_sims = 2000  # Fast early iterations
-            elif iteration < 6:
-                current_sims = 3000  # Medium
-            else:
-                current_sims = n_sims  # Full accuracy for final iterations
+            # Convolve all quarters
+            h1_dist = self.convolve_quarters(q1_dist, q2_dist)
+            h2_dist = self.convolve_quarters(q3_dist, q4_dist)
+            game_dist = self.convolve_quarters(h1_dist, h2_dist)
             
-            # Simulate with correlation
-            full_game_dist = self.simulate_game_with_correlation(
-                pregame_spread, total, n_sims=current_sims,
-                q1_dist=dist_q1, q2_dist=dist_q2, q3_dist=dist_q3, q4_dist=dist_q4
-            )
+            # Calculate current probabilities
+            current_cover_pct, current_over_pct = calculate_probabilities(game_dist)
             
-            prob_fav_cover, prob_over = calculate_metrics(full_game_dist)
-            total_error = 0.50 - prob_over
-            spread_error = 0.50 - prob_fav_cover
+            # Error is deviation from 50%
+            spread_error = current_cover_pct - 0.50
+            total_error = current_over_pct - 0.50
             
-            if iteration % 2 == 0:
-                print(f"  Iter {iteration + 1}: Cover={prob_fav_cover*100:.2f}%, Over={prob_over*100:.2f}% ({current_sims} sims)")
+            print(f"  Iteration {iteration+1}: Cover={current_cover_pct*100:.2f}% (Err: {spread_error*100:+.2f}%), Over={current_over_pct*100:.2f}% (Err: {total_error*100:+.2f}%)")
             
-            # Check convergence
-            if abs(total_error) < TOLERANCE and abs(spread_error) < TOLERANCE:
-                print(f"✓ Converged at iteration {iteration + 1}")
-                print(f"  Final Cover: {prob_fav_cover*100:.2f}%")
-                print(f"  Final Over:  {prob_over*100:.2f}%")
-                return {
-                    'q1': dist_q1,
-                    'q2': dist_q2,
-                    'q3': dist_q3,
-                    'q4': dist_q4,
-                    'full_game': full_game_dist
-                }
+            # Check convergence (Within 49.5% - 50.5%)
+            if abs(spread_error) < 0.005 and abs(total_error) < 0.005:
+                print(f"  Converged after {iteration+1} iterations")
+                break
             
-            # Apply gradient update
-            quarters = [dist_q1, dist_q2, dist_q3, dist_q4]
-            
-            for q_idx, q_dist in enumerate(quarters):
-                updated_dist = {}
+            # Calculate adjustments in logit space
+            for q, q_dist in [(1, q1_dist), (2, q2_dist), (3, q3_dist), (4, q4_dist)]:
+                q_pct = getattr(self, f'Q{q}_PERCENTAGE_POINTS')
                 
+                # Convert to logit space
+                logits = {}
                 for score, prob in q_dist.items():
-                    total_resp, spread_resp = calculate_responsibility(
-                        score, expected_totals[q_idx], expected_margins[q_idx]
-                    )
-                    
-                    total_factor = 1.0 + (LEARNING_RATE * total_error * total_resp)
-                    spread_factor = 1.0 + (LEARNING_RATE * spread_error * spread_resp)
-                    
-                    total_factor = np.clip(total_factor, CLAMP_MIN, CLAMP_MAX)
-                    spread_factor = np.clip(spread_factor, CLAMP_MIN, CLAMP_MAX)
-                    
-                    updated_prob = prob * total_factor * spread_factor
-                    updated_dist[score] = updated_prob
+                    logits[score] = prob_to_logit(prob)
                 
-                # Renormalize
-                total_prob = sum(updated_dist.values())
+                # Adjust based on errors
+                for score in q_dist.keys():
+                    fav_pts, dog_pts = map(int, score.split('-'))
+                    score_total = fav_pts + dog_pts
+                    score_margin = fav_pts - dog_pts
+                    
+                    # Use score_margin/total as directional vector for probability shift
+                    spread_adjustment = -spread_learning_rate * spread_error * score_margin * q_pct
+                    total_adjustment = -total_learning_rate * total_error * score_total * q_pct
+                    
+                    # Clamp updates
+                    total_update = spread_adjustment + total_adjustment
+                    total_update = np.clip(total_update, -0.5, 0.5)
+                    
+                    logits[score] += total_update
+                
+                # Convert back to probabilities and normalize
+                new_probs = {score: logit_to_prob(logit) for score, logit in logits.items()}
+                total_prob = sum(new_probs.values())
                 if total_prob > 0:
-                    updated_dist = {score: prob / total_prob 
-                                  for score, prob in updated_dist.items()}
+                    new_probs = {score: prob / total_prob for score, prob in new_probs.items()}
                 
-                quarters[q_idx] = updated_dist
-            
-            dist_q1, dist_q2, dist_q3, dist_q4 = quarters
+                # Update distribution
+                if q == 1:
+                    q1_dist = new_probs
+                elif q == 2:
+                    q2_dist = new_probs
+                elif q == 3:
+                    q3_dist = new_probs
+                else:
+                    q4_dist = new_probs
         
-        # If we hit max iterations, do one final high-quality simulation
-        print(f"\n⚠ Reached max iterations, final simulation...")
-        full_game_dist = self.simulate_game_with_correlation(
-            pregame_spread, total, n_sims=n_sims,
-            q1_dist=dist_q1, q2_dist=dist_q2, q3_dist=dist_q3, q4_dist=dist_q4
+        print(f"  Final: Cover={current_cover_pct*100:.2f}%, Over={current_over_pct*100:.2f}%\n")
+        
+        print("  Running final correlated simulation with calibrated marginals...")
+        sim_results = self.simulate_game_with_calibrated_marginals(
+            q1_dist, q2_dist, q3_dist, q4_dist,
+            pregame_spread, total, n_sims=n_sims
         )
         
-        prob_fav_cover, prob_over = calculate_metrics(full_game_dist)
-        print(f"  Final Cover: {prob_fav_cover*100:.2f}%")
-        print(f"  Final Over:  {prob_over*100:.2f}%")
+        return sim_results
+    
+    def simulate_game_with_calibrated_marginals(self, q1_dist, q2_dist, q3_dist, q4_dist,
+                                                pregame_spread, total, n_sims=10000):
+        """
+        Run simulation using CALIBRATED base distributions.
+        Captures correlations and garbage time effects while maintaining market efficiency.
+        """
+        all_simulations = []
         
-        return {
-            'q1': dist_q1,
-            'q2': dist_q2,
-            'q3': dist_q3,
-            'q4': dist_q4,
-            'full_game': full_game_dist
+        # Pre-convert for faster sampling
+        q1_scores = list(q1_dist.keys())
+        q1_probs = list(q1_dist.values())
+        
+        for _ in range(n_sims):
+            # Sample Q1 from calibrated distribution
+            q1_score = np.random.choice(q1_scores, p=q1_probs)
+            
+            # Sample Q2 with Q1 correlation
+            q1_context = self._categorize_quarter_outcome(q1_score)
+            q2_corr_dist = self.adjust_quarter_for_correlation(
+                q2_dist, q1_context,
+                self.conditional_q2_given_q1,
+                self.conditional_q2_sample_sizes
+            )
+            q2_scores = list(q2_corr_dist.keys())
+            q2_probs = list(q2_corr_dist.values())
+            q2_score = np.random.choice(q2_scores, p=q2_probs)
+            
+            # Calculate H1 for Q3 conditioning
+            q1_fav, q1_dog = map(int, q1_score.split('-'))
+            q2_fav, q2_dog = map(int, q2_score.split('-'))
+            h1_fav = q1_fav + q2_fav
+            h1_dog = q1_dog + q2_dog
+            h1_score = f"{h1_fav}-{h1_dog}"
+            
+            # Sample Q3 with H1 correlation
+            h1_context = self._categorize_halftime_outcome(h1_score)
+            q3_corr_dist = self.adjust_quarter_for_correlation(
+                q3_dist, h1_context,
+                self.conditional_q3_given_h1,
+                self.conditional_q3_sample_sizes
+            )
+            q3_scores = list(q3_corr_dist.keys())
+            q3_probs = list(q3_corr_dist.values())
+            q3_score = np.random.choice(q3_scores, p=q3_probs)
+            
+            # Sample Q4 with garbage time blending
+            q3_fav, q3_dog = map(int, q3_score.split('-'))
+            h1_margin = h1_fav - h1_dog
+            q3_margin = q3_fav - q3_dog
+            entering_margin = h1_margin + q3_margin
+            
+            # Get garbage probability
+            garbage_prob = self.predict_garbage_probability(entering_margin)
+            
+            # Create context
+            entering_total = h1_fav + h1_dog + q3_fav + q3_dog
+            
+            if entering_total <= 28:
+                total_cat = 'low'
+            elif entering_total <= 56:
+                total_cat = 'med'
+            else:
+                total_cat = 'high'
+            
+            abs_margin = abs(entering_margin)
+            if abs_margin < 4:
+                margin_cat = 'close'
+            elif abs_margin < 8:
+                margin_cat = 'onescore'
+            elif abs_margin < 12:
+                margin_cat = 'onescore_plus'
+            elif abs_margin < 17:
+                margin_cat = 'twoscore'
+            elif abs_margin < 24:
+                margin_cat = 'threescore'
+            else:
+                margin_cat = 'blowout'
+            
+            if entering_margin > 0:
+                margin_cat += '_fav'
+            elif entering_margin < 0:
+                margin_cat += '_dog'
+            
+            context = f"{total_cat}_{margin_cat}"
+            
+            # Blend with competitive distribution
+            competitive_dist = self.conditional_q4_competitive.get(context, {})
+            competitive_n = self.conditional_q4_sample_sizes_competitive.get(context, 0)
+            competitive_credibility = competitive_n / (competitive_n + self.CREDIBILITY_K)
+            
+            competitive_adjusted = {}
+            all_scores = set(q4_dist.keys()) | set(competitive_dist.keys())
+            
+            for score in all_scores:
+                base_prob = q4_dist.get(score, 0)
+                cond_prob = competitive_dist.get(score, base_prob)
+                competitive_adjusted[score] = (1 - competitive_credibility) * base_prob + competitive_credibility * cond_prob
+            
+            # Blend with garbage distribution
+            garbage_dist = self.conditional_q4_garbage.get(context, {})
+            garbage_n = self.conditional_q4_sample_sizes_garbage.get(context, 0)
+            garbage_credibility = garbage_n / (garbage_n + self.CREDIBILITY_K)
+            
+            garbage_adjusted = {}
+            for score in all_scores:
+                base_prob = q4_dist.get(score, 0)
+                cond_prob = garbage_dist.get(score, base_prob)
+                garbage_adjusted[score] = (1 - garbage_credibility) * base_prob + garbage_credibility * cond_prob
+            
+            # Smooth mixture based on garbage_prob
+            q4_final_dist = {}
+            for score in all_scores:
+                comp_prob = competitive_adjusted.get(score, 0)
+                garb_prob = garbage_adjusted.get(score, 0)
+                q4_final_dist[score] = (1 - garbage_prob) * comp_prob + garbage_prob * garb_prob
+            
+            # Normalize
+            total_prob = sum(q4_final_dist.values())
+            if total_prob > 0:
+                q4_final_dist = {score: prob/total_prob for score, prob in q4_final_dist.items()}
+            
+            q4_scores = list(q4_final_dist.keys())
+            q4_probs = list(q4_final_dist.values())
+            q4_score = np.random.choice(q4_scores, p=q4_probs)
+            
+            # Parse Q4
+            q4_fav, q4_dog = map(int, q4_score.split('-'))
+            
+            # Calculate game totals
+            game_fav = q1_fav + q2_fav + q3_fav + q4_fav
+            game_dog = q1_dog + q2_dog + q3_dog + q4_dog
+            
+            all_simulations.append({
+                'q1_fav': q1_fav, 'q1_dog': q1_dog,
+                'q2_fav': q2_fav, 'q2_dog': q2_dog,
+                'q3_fav': q3_fav, 'q3_dog': q3_dog,
+                'q4_fav': q4_fav, 'q4_dog': q4_dog,
+                'game_fav': game_fav, 'game_dog': game_dog
+            })
+        
+        sim_df = pd.DataFrame(all_simulations)
+        
+        # Convert simulation results to probability distributions
+        final_distributions = {
+            'q1': self._df_to_dist(sim_df, 'q1_fav', 'q1_dog'),
+            'q2': self._df_to_dist(sim_df, 'q2_fav', 'q2_dog'),
+            'q3': self._df_to_dist(sim_df, 'q3_fav', 'q3_dog'),
+            'q4': self._df_to_dist(sim_df, 'q4_fav', 'q4_dog'),
+            'game': self._df_to_dist(sim_df, 'game_fav', 'game_dog')
         }
+        
+        # Calculate H1 and H2
+        sim_df['h1_fav'] = sim_df['q1_fav'] + sim_df['q2_fav']
+        sim_df['h1_dog'] = sim_df['q1_dog'] + sim_df['q2_dog']
+        sim_df['h2_fav'] = sim_df['q3_fav'] + sim_df['q4_fav']
+        sim_df['h2_dog'] = sim_df['q3_dog'] + sim_df['q4_dog']
+        
+        final_distributions['h1'] = self._df_to_dist(sim_df, 'h1_fav', 'h1_dog')
+        final_distributions['h2'] = self._df_to_dist(sim_df, 'h2_fav', 'h2_dog')
+        
+        return final_distributions
+    
+    def _df_to_dist(self, df, fav_col, dog_col):
+        """Convert simulation dataframe to probability distribution."""
+        score_counts = df.groupby([fav_col, dog_col]).size()
+        total_sims = len(df)
+        
+        dist = {}
+        for (fav, dog), count in score_counts.items():
+            score = f"{fav}-{dog}"
+            dist[score] = count / total_sims
+        
+        return dist
     
     def predict(self, pregame_spread, total, debug=False, n_sims=5000, max_calibration_iterations=60):
         """
-        Generate predictions for all quarters and combine with proper calibration.
+        Generate complete quarter-by-quarter predictions.
         
-        NEW: Uses Bayesian simulation with quarter correlations and true calibration.
+        Args:
+            pregame_spread: Negative if home favored, positive if away favored
+            total: Game total points
+            debug: If True, print detailed information
+            n_sims: Number of simulations for correlation analysis
+            max_calibration_iterations: Maximum iterations for calibration
         
-        Returns dictionary with all quarter distributions plus calibrated full game.
+        Returns:
+            Dictionary with quarter and game distributions
         """
         home_favored = pregame_spread < 0
         
-        if not debug:
-            # Suppress output for clean API usage
-            import sys
-            from io import StringIO
-            old_stdout = sys.stdout
-            sys.stdout = StringIO()
+        if debug:
+            print(f"\nPrediction Request:")
+            print(f"  Pregame Spread: {pregame_spread:+.1f} ({'Home' if home_favored else 'Away'} favored)")
+            print(f"  Pregame Total: {total:.1f}")
         
-        try:
-            # NEW: Use calibration method which returns both calibrated full game 
-            # and the adjusted quarter distributions used to produce it
-            calibration_result = self.calibrate_full_game_distribution(
-                pregame_spread, total, 
-                max_iterations=max_calibration_iterations, 
-                n_sims=n_sims
-            )
+        # Calibrate distributions
+        calibrated = self.calibrate_full_game_distribution(
+            pregame_spread, total,
+            max_iterations=max_calibration_iterations,
+            n_sims=n_sims
+        )
+        
+        # Convert to home-away format
+        result = {}
+        for key in ['q1', 'q2', 'q3', 'q4', 'h1', 'h2', 'game']:
+            result[key] = self.convert_to_home_away_format(calibrated[key], home_favored)
+        
+        if debug:
+            print("\n" + "="*80)
+            print("Q1 RESULTS")
+            print("="*80)
+            print("\nTop 10 Q1 Outcomes:")
+            sorted_q1 = sorted(result['q1'].items(), key=lambda x: x[1], reverse=True)
+            for i, (score, prob) in enumerate(sorted_q1[:10], 1):
+                print(f"  {i:2d}. {score:>7}: {prob*100:>6.2f}%")
             
-            # Extract calibrated quarters and full game
-            dist_q1 = calibration_result['q1']
-            dist_q2 = calibration_result['q2']
-            dist_q3 = calibration_result['q3']
-            dist_q4 = calibration_result['q4']
-            dist_full_game = calibration_result['full_game']
+            # Calculate Q1 tie probability
+            q1_tie_prob = sum(prob for score, prob in result['q1'].items() if score.split('-')[0] == score.split('-')[1])
+            print(f"\nP(Q1 Tie): {q1_tie_prob*100:.2f}%")
             
-            # Generate halves using simple convolution for display
-            # (Could also extract these from calibration if needed)
-            dist_h1 = self.convolve_quarters(dist_q1, dist_q2)
-            dist_h2 = self.convolve_quarters(dist_q3, dist_q4)
+            # Calculate Q1 over 12.5 (13+)
+            q1_over_12_5 = sum(prob for score, prob in result['q1'].items() 
+                               if int(score.split('-')[0]) + int(score.split('-')[1]) >= 13)
+            print(f"P(Q1 Over 12.5): {q1_over_12_5*100:.2f}%")
             
-            # Convert to home-away format
-            dist_q1_home_away = self.convert_to_home_away_format(dist_q1, home_favored)
-            dist_q2_home_away = self.convert_to_home_away_format(dist_q2, home_favored)
-            dist_q3_home_away = self.convert_to_home_away_format(dist_q3, home_favored)
-            dist_q4_home_away = self.convert_to_home_away_format(dist_q4, home_favored)
-            dist_h1_home_away = self.convert_to_home_away_format(dist_h1, home_favored)
-            dist_h2_home_away = self.convert_to_home_away_format(dist_h2, home_favored)
-            dist_full_game_home_away = self.convert_to_home_away_format(dist_full_game, home_favored)
+            # Calculate specific tie scores
+            q1_7_7 = result['q1'].get('7-7', 0)
+            q1_14_14 = result['q1'].get('14-14', 0)
+            print(f"\nP(Q1 = 7-7): {q1_7_7*100:.2f}%")
+            print(f"P(Q1 = 14-14): {q1_14_14*100:.2f}%")
+            print(f"P(Q1 = 7-7 or 14-14): {(q1_7_7 + q1_14_14)*100:.2f}%")
             
-            return {
-                'q1_fav_dog': dist_q1,
-                'q2_fav_dog': dist_q2,
-                'q3_fav_dog': dist_q3,
-                'q4_fav_dog': dist_q4,
-                'h1_fav_dog': dist_h1,
-                'h2_fav_dog': dist_h2,
-                'full_game_fav_dog': dist_full_game,
-                'q1_home_away': dist_q1_home_away,
-                'q2_home_away': dist_q2_home_away,
-                'q3_home_away': dist_q3_home_away,
-                'q4_home_away': dist_q4_home_away,
-                'h1_home_away': dist_h1_home_away,
-                'h2_home_away': dist_h2_home_away,
-                'full_game_home_away': dist_full_game_home_away,
-                'spread': pregame_spread,
-                'total': total,
-                'home_favored': home_favored
-            }
-            
-        finally:
-            if not debug:
-                sys.stdout = old_stdout
-
-
-load_dotenv()
+            print("\n" + "="*80)
+            print("FULL GAME RESULTS")
+            print("="*80)
+            print("\nTop 10 Game Outcomes:")
+            sorted_game = sorted(result['game'].items(), key=lambda x: x[1], reverse=True)
+            for i, (score, prob) in enumerate(sorted_game[:10], 1):
+                print(f"  {i:2d}. {score:>9}: {prob*100:>6.2f}%")
+        
+        return result
 
 def main():
-    """Main execution function."""
+    """Interactive mode for predictions"""
+    load_dotenv()
+    
     db_config = {
-        'host': os.getenv('DB_HOST', '127.0.0.1'),
-        'port': int(os.getenv('DB_PORT', 3306)),
-        'user': os.getenv('DB_USER', 'root'),
-        'password': os.getenv('DB_PASSWORD', ''),
-        'database': os.getenv('DB_NAME', 'cfb')
+        'host': os.getenv('DB_HOST'),
+        'user': os.getenv('DB_USER'),
+        'password': os.getenv('DB_PASSWORD'),
+        'database': os.getenv('DB_NAME')
     }
     
     predictor = CFBAllQuartersPredictor(db_config)
     
-    print("="*80)
-    print("CFB ALL QUARTERS PREDICTOR - IMPROVED VERSION")
-    print("="*80)
-    print("NEW Features:")
-    print("  ✓ True calibration: adjusts quarter distributions proportionally")
-    print("  ✓ Percentage-based anchor threshold (0.75% with floor of 50)")
-    print("  ✓ Bayesian quarter correlation: P(Q2|Q1), P(Q3|H1), P(Q4|H1,Q3)")
-    print("  ✓ Learned conditional probabilities from historical data")
-    print("="*80)
-    
-    print("\nLoading historical data...")
+    print("Loading historical data...")
     if not predictor.load_historical_data():
         print("Failed to load data")
         return
@@ -1268,68 +1869,37 @@ def main():
     print("\nCalculating empirical distributions...")
     predictor.calculate_empirical_distribution()
     
-    print("\nFitting models for all quarters...")
+    print("\nFitting models...")
     predictor.fit_model()
     
     print("\n" + "="*80)
-    print("MODEL READY")
+    print("CFB QUARTER-BY-QUARTER PREDICTION MODEL")
     print("="*80)
-    print("Enter signed spread and total for predictions")
-    print("Format: spread total (e.g., -3.5 58.5)")
-    print("Type 'quit' to exit\n")
+    print("\nModel ready for predictions!")
     
     while True:
+        print("\n" + "-"*80)
         try:
-            user_input = input("\nEnter spread and total: ").strip()
-            if user_input.lower() in ['quit', 'exit', 'q']:
+            spread_input = input("\nEnter pregame spread (negative=home favored, or 'q' to quit): ").strip()
+            if spread_input.lower() == 'q':
+                print("Exiting...")
                 break
             
-            parts = user_input.split()
-            if len(parts) != 2:
-                print("Enter two numbers: spread and total")
-                continue
+            pregame_spread = float(spread_input)
+            total = float(input("Enter pregame total: ").strip())
             
-            pregame_spread = float(parts[0])
-            total = float(parts[1])
+            print("\nGenerating predictions...")
+            predictions = predictor.predict(
+                pregame_spread=pregame_spread,
+                total=total,
+                debug=True,
+                n_sims=10000
+            )
             
-            if not (-50 <= pregame_spread <= 50) or not (30 <= total <= 90):
-                print("Use realistic values: spread -50 to 50, total 30 to 90")
-                continue
-            
-            result = predictor.predict(pregame_spread, total, debug=True)
-            
-            # Display top predictions
-            print(f"\n{'='*80}")
-            print(f"TOP PREDICTIONS BY QUARTER")
-            print(f"{'='*80}")
-            
-            for q in [1, 2, 3, 4]:
-                dist = result[f'q{q}_home_away']
-                sorted_scores = sorted(dist.items(), key=lambda x: x[1], reverse=True)[:10]
-                print(f"\nQuarter {q} - Top 10:")
-                for score, prob in sorted_scores:
-                    print(f"  {score:<10} {prob*100:>6.2f}%")
-
-            # Over 12.5 Q1 and Draw
-            print(f"\nQ1 Draw & Over 12.5: {sum(p for s, p in result['q1_home_away'].items() if int(s.split('-')[0]) == int(s.split('-')[1]) and sum(map(int, s.split('-'))) > 12.5)*100:.2f}%")
-            # Display first half
-            dist_h1 = result['h1_home_away']
-            sorted_h1 = sorted(dist_h1.items(), key=lambda x: x[1], reverse=True)[:10]
-            print(f"\nFirst Half - Top 10:")
-            for score, prob in sorted_h1:
-                print(f"  {score:<10} {prob*100:>6.2f}%")
-            
-            # Display full game (calibrated)
-            dist_fg = result['full_game_home_away']
-            sorted_fg = sorted(dist_fg.items(), key=lambda x: x[1], reverse=True)[:10]
-            print(f"\nFull Game (Calibrated with Correlation) - Top 10:")
-            for score, prob in sorted_fg:
-                print(f"  {score:<10} {prob*100:>6.2f}%")
-            
-        except ValueError:
-            print("Enter valid numbers")
+        except ValueError as e:
+            print(f"Invalid input: {e}. Please enter numeric values.")
         except KeyboardInterrupt:
-            print("\nExiting...")
+            print("\n\nExiting...")
             break
         except Exception as e:
             print(f"Error: {e}")
